@@ -46,8 +46,10 @@ if (!state.votes) state.votes = {};
 if (!state.maxVotes) state.maxVotes = 3;
 if (!state.voteMessageId) state.voteMessageId = null;
 if (!state.voteChannelId) state.voteChannelId = null;
+if (!state.voteInstructionMessageId) state.voteInstructionMessageId = null;
 if (!state.panelMessageId) state.panelMessageId = null;
 if (!state.signupChannelId) state.signupChannelId = null;
+if (typeof state.votingActive === 'undefined') state.votingActive = false;
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
@@ -63,8 +65,10 @@ function loadState() {
       maxVotes: 3,
       voteMessageId: null,
       voteChannelId: null,
+      voteInstructionMessageId: null,
       panelMessageId: null,
-      signupChannelId: null
+      signupChannelId: null,
+      votingActive: false
     };
   }
 }
@@ -142,12 +146,19 @@ function tallyVotes() {
 }
 function voteResultsEmbed() {
   const sorted = tallyVotes();
+  const title = state.votingActive ? '🎮 LAN Game Votes' : '🏁 Final Game Vote Results';
   return new EmbedBuilder()
-    .setTitle("🎮 LAN Game Votes")
+    .setTitle(title)
     .setColor(0x00AE86)
     .setDescription(sorted.length === 0
       ? "No votes yet."
       : sorted.map(([g,n],idx)=>`**${idx+1}. ${g}** — ${n} vote${n!==1?'s':''}`).join('\n'));
+}
+function voteInstructionEmbed() {
+  return new EmbedBuilder()
+    .setTitle('🗳️ LAN Game Voting')
+    .setColor(0x5865F2)
+    .setDescription(`Use /vote, /unvote, /suggestgame.\nMax ${state.maxVotes} votes per user.`);
 }
 async function updateVoteMessage(guild) {
   if (!state.voteMessageId || !state.voteChannelId) return;
@@ -155,6 +166,14 @@ async function updateVoteMessage(guild) {
     const ch = await guild.channels.fetch(state.voteChannelId);
     const msg = await ch.messages.fetch(state.voteMessageId);
     await msg.edit({ embeds: [voteResultsEmbed()] });
+  } catch {}
+}
+async function updateVoteInstructionMessage(guild) {
+  if (!state.voteInstructionMessageId || !state.voteChannelId) return;
+  try {
+    const ch = await guild.channels.fetch(state.voteChannelId);
+    const msg = await ch.messages.fetch(state.voteInstructionMessageId);
+    await msg.edit({ embeds: [voteInstructionEmbed()] });
   } catch {}
 }
 
@@ -171,17 +190,16 @@ client.once(Events.ClientReady, async () => {
   { name: 'setcapacity', description: 'Set LAN seat capacity', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'capacity', description: 'New seat capacity', required: true }] },
   { name: 'clearstatus', description: 'Clear a user’s status', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 6, name: 'user', description: 'User to clear', required: true }] },
   { name: 'export', description: 'Export CSV of signups', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    { name: 'name', description: 'Set your display to "nick - real name"' },
+  { name: 'name', description: 'Set your display to "nick - real name"', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
 
     // Voting
     { name: 'vote', description: 'Vote for a game', options: [{ type: 3, name: 'game', description: 'Game name', required: true, autocomplete: true }] },
     { name: 'unvote', description: 'Remove one of your votes' },
-    { name: 'results', description: 'Show votes' },
+  { name: 'results', description: 'Show votes', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
     { name: 'suggestgame', description: 'Add a new game', options: [{ type: 3, name: 'title', description: 'Game title', required: true }] },
-    { name: 'setmaxvotes', description: 'Set max votes per user', options: [{ type: 4, name: 'number', description: 'Max votes', required: true }] },
-  { name: 'votemessage', description: 'Post voting instructions', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-  { name: 'postvotesnapshot', description: 'Admin: post a snapshot of current vote results', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    { name: 'votereset', description: 'Clear all votes' }
+  { name: 'setmaxvotes', description: 'Set max votes per user', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'number', description: 'Max votes', required: true }] },
+  { name: 'votestart', description: 'Start a voting session (posts instructions and results)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [ { type: 4, name: 'maxvotes', description: 'Override max votes per user', required: false } ] },
+  { name: 'votestop', description: 'Stop the voting session and finalize results', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild }
     ,
   { name: 'reorderwaitlist', description: 'Admin: move user in waitlist', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 6, name: 'user', description: 'User to move', required: true },
@@ -202,11 +220,61 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
-      if (i.commandName === 'postvotesnapshot') {
+      // Voting session controls
+      if (i.commandName === 'votestart') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
-        const snapshot = voteResultsEmbed();
-        await i.channel.send({ embeds: [snapshot] });
-        return i.reply({ content: '🧾 Posted vote snapshot in this channel.', flags: MessageFlags.Ephemeral });
+        const mv = i.options.getInteger('maxvotes');
+        if (mv && mv > 0) state.maxVotes = mv;
+        // Reset votes for a fresh session
+        state.votes = {};
+        state.votingActive = true;
+        saveState();
+        // Remove any old instruction message
+        if (state.voteInstructionMessageId && state.voteChannelId) {
+          try {
+            const ch = await i.guild.channels.fetch(state.voteChannelId);
+            const m = await ch.messages.fetch(state.voteInstructionMessageId);
+            await m.delete();
+          } catch {}
+          state.voteInstructionMessageId = null;
+        }
+        // Post fresh instruction
+        const instrMsg = await i.channel.send({ embeds: [voteInstructionEmbed()] });
+        state.voteInstructionMessageId = instrMsg.id;
+        // Post or update results message, ensuring it exists
+        if (state.voteMessageId && state.voteChannelId === i.channel.id) {
+          try {
+            const ch = await i.guild.channels.fetch(state.voteChannelId);
+            const msg = await ch.messages.fetch(state.voteMessageId);
+            await msg.edit({ embeds: [voteResultsEmbed()] });
+          } catch {
+            const resMsg = await i.channel.send({ embeds: [voteResultsEmbed()] });
+            state.voteMessageId = resMsg.id;
+          }
+        } else {
+          const resMsg = await i.channel.send({ embeds: [voteResultsEmbed()] });
+          state.voteMessageId = resMsg.id;
+        }
+        state.voteChannelId = i.channel.id;
+        saveState();
+        return i.reply({ content: `🟢 Voting started. Max votes per user: ${state.maxVotes}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (i.commandName === 'votestop') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        state.votingActive = false;
+        // Delete instructions
+        if (state.voteInstructionMessageId && state.voteChannelId) {
+          try {
+            const ch = await i.guild.channels.fetch(state.voteChannelId);
+            const m = await ch.messages.fetch(state.voteInstructionMessageId);
+            await m.delete();
+          } catch {}
+          state.voteInstructionMessageId = null;
+        }
+        saveState();
+        // Update results title to final
+        await updateVoteMessage(i.guild);
+        return i.reply({ content: '🛑 Voting stopped. Results finalized.', flags: MessageFlags.Ephemeral });
       }
       // Admin: view waitlist
       if (i.commandName === 'waitlist') {
@@ -321,6 +389,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
       // Voting commands
       if (i.commandName === 'vote') {
+        if (!state.votingActive) return i.reply({ content: '⚠️ No voting in progress.', flags: MessageFlags.Ephemeral });
         const game = i.options.getString('game');
         const match = games.find(g => g.toLowerCase() === game.toLowerCase());
         if (!match) return i.reply({ content: `⚠️ "${game}" not found.`, flags: MessageFlags.Ephemeral });
@@ -334,6 +403,7 @@ client.on(Events.InteractionCreate, async (i) => {
         return i.reply({ content: `✅ Voted for ${match}.`, flags: MessageFlags.Ephemeral });
       }
       if (i.commandName === 'unvote') {
+        if (!state.votingActive) return i.reply({ content: '⚠️ No voting in progress.', flags: MessageFlags.Ephemeral });
         const userVotes = state.votes[i.user.id] || [];
         if (userVotes.length === 0) return i.reply({ content: `⚠️ No votes to remove.`, flags: MessageFlags.Ephemeral });
         const row = new ActionRowBuilder().addComponents(
@@ -356,28 +426,12 @@ client.on(Events.InteractionCreate, async (i) => {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
         state.maxVotes = i.options.getInteger('number');
         saveState();
-        return i.reply({ content: `✅ Max votes set to ${state.maxVotes}.`, flags: MessageFlags.Ephemeral });
-      }
-      if (i.commandName === 'votemessage') {
-        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
-        const instr = new EmbedBuilder()
-          .setTitle('🗳️ LAN Game Voting')
-          .setColor(0x5865F2)
-          .setDescription(`Use /vote, /unvote, /results.\nMax ${state.maxVotes} votes per user.`);
-        await i.channel.send({ embeds: [instr] });
-        const msg = await i.channel.send({ embeds: [voteResultsEmbed()] });
-        state.voteMessageId = msg.id;
-        state.voteChannelId = i.channel.id;
-        saveState();
-        return i.reply({ content: `📢 Voting setup posted.`, flags: MessageFlags.Ephemeral });
-      }
-      if (i.commandName === 'votereset') {
-        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
-        state.votes = {};
-        saveState();
+        // Update both instruction and results messages if configured
+        await updateVoteInstructionMessage(i.guild);
         await updateVoteMessage(i.guild);
-        return i.reply({ content: '🗑️ Votes cleared.' });
+        return i.reply({ content: `✅ Max votes set to ${state.maxVotes}. Updated vote messages.`, flags: MessageFlags.Ephemeral });
       }
+      // removed legacy votemessage / postvotesnapshot / votereset
     }
 
     // Button handlers
