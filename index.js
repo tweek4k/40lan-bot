@@ -124,6 +124,14 @@ async function swapRoles(member, map, target) {
   if (target) await member.roles.add(map[target]).catch(()=>{});
 }
 
+// Ensure a user is not present in multiple signup lists simultaneously
+function removeFromAllLists(userId) {
+  state.lan = state.lan.filter(x => x !== userId);
+  state.maybe = state.maybe.filter(x => x !== userId);
+  state.remote = state.remote.filter(x => x !== userId);
+  state.waitlist = state.waitlist.filter(x => x !== userId);
+}
+
 // ----------------- voting helpers -----------------
 function tallyVotes() {
   const tally = {};
@@ -157,13 +165,11 @@ client.once(Events.ClientReady, async () => {
   await ensureRoles(guild);
 
   await guild.commands.set([
+  { name: 'waitlist', description: 'Admin: view waitlist and order', options: [] },
     // Signup commands
     { name: 'postsignup', description: 'Post the signup panel', options: [{ type: 4, name: 'capacity', description: 'Seat capacity', required: false }] },
     { name: 'setcapacity', description: 'Set LAN seat capacity', options: [{ type: 4, name: 'capacity', description: 'New seat capacity', required: true }] },
     { name: 'clearstatus', description: 'Clear a user’s status', options: [{ type: 6, name: 'user', description: 'User to clear', required: true }] },
-    { name: 'approve', description: 'Approve a user from waitlist', options: [{ type: 6, name: 'user', description: 'User to approve', required: true }] },
-    { name: 'deny', description: 'Remove a user from waitlist', options: [{ type: 6, name: 'user', description: 'User to deny', required: true }] },
-    { name: 'statuslist', description: 'Show current signup lists' },
     { name: 'export', description: 'Export CSV of signups' },
     { name: 'name', description: 'Set your display to "nick - real name"' },
 
@@ -175,13 +181,18 @@ client.once(Events.ClientReady, async () => {
     { name: 'setmaxvotes', description: 'Set max votes per user', options: [{ type: 4, name: 'number', description: 'Max votes', required: true }] },
     { name: 'votemessage', description: 'Post voting instructions' },
     { name: 'votereset', description: 'Clear all votes' }
+    ,
+    { name: 'reorderwaitlist', description: 'Admin: move user in waitlist', options: [
+      { type: 6, name: 'user', description: 'User to move', required: true },
+      { type: 4, name: 'position', description: 'New position (1 = top)', required: true }
+    ] }
   ]);
 });
 
 // ----------------- interactions -----------------
 client.on(Events.InteractionCreate, async (i) => {
   try {
-    // autocomplete for /vote
+    // Autocomplete for /vote
     if (i.isAutocomplete()) {
       const focused = i.options.getFocused();
       const filtered = games.filter(g => g.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
@@ -190,7 +201,15 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
-      // signup: postsignup
+      // Admin: view waitlist
+      if (i.commandName === 'waitlist') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.Administrator)) return i.reply({ content: '❌ Need Admin.', flags: MessageFlags.Ephemeral });
+        if (!state.waitlist.length) return i.reply({ content: 'Waitlist is empty.', flags: MessageFlags.Ephemeral });
+        const lines = state.waitlist.map((id, idx) => `${idx + 1}. <@${id}>`).join('\n');
+        return i.reply({ content: `**Current Waitlist:**\n${lines}`, flags: MessageFlags.Ephemeral });
+      }
+
+      // Signup: postsignup
       if (i.commandName === 'postsignup') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
         const cap = i.options.getInteger('capacity');
@@ -204,29 +223,96 @@ client.on(Events.InteractionCreate, async (i) => {
         return i.reply({ content: `📢 Signup panel posted in <#${ch.id}>.`, flags: MessageFlags.Ephemeral });
       }
 
-      // signup: setcapacity
+      // Signup: clearstatus
+      if (i.commandName === 'clearstatus') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        const userId = i.options.getUser('user').id;
+        state.lan = state.lan.filter(x => x !== userId);
+        state.maybe = state.maybe.filter(x => x !== userId);
+        state.remote = state.remote.filter(x => x !== userId);
+        state.waitlist = state.waitlist.filter(x => x !== userId);
+        saveState();
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        return i.reply({ content: `✅ Cleared status for <@${userId}>.`, flags: MessageFlags.Ephemeral });
+      }
+
+      // Signup: setcapacity
       if (i.commandName === 'setcapacity') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
         const newCap = i.options.getInteger('capacity');
         const oldCap = state.capacity;
         state.capacity = newCap;
+        let promoted = [];
+        let demoted = [];
+        const roles = await ensureRoles(i.guild);
         if (newCap > oldCap) {
+          // Promote from waitlist by timestamp
+          state.waitlist.sort((a, b) => {
+            const ta = new Date(state.timestamps[a] || 0);
+            const tb = new Date(state.timestamps[b] || 0);
+            return ta - tb;
+          });
           while (state.lan.length < newCap && state.waitlist.length > 0) {
             const next = state.waitlist.shift();
             state.lan.push(next);
+            promoted.push(next);
           }
+          // Update roles for promoted users
+          await Promise.all(promoted.map(async (uid) => {
+            try { const m = await i.guild.members.fetch(uid); await swapRoles(m, roles, ROLES.LAN); } catch {}
+          }));
         } else if (newCap < oldCap && state.lan.length > newCap) {
+          // Demote overflow by oldest timestamp first
           const sorted = [...state.lan].sort((a,b)=> new Date(state.timestamps[a]) - new Date(state.timestamps[b]));
           const keep = sorted.slice(0, newCap);
           const drop = sorted.slice(newCap);
           state.lan = keep;
           state.waitlist = [...drop, ...state.waitlist];
+          demoted = drop;
+          // Update roles for demoted users
+          await Promise.all(demoted.map(async (uid) => {
+            try { const m = await i.guild.members.fetch(uid); await swapRoles(m, roles, ROLES.WAIT); } catch {}
+          }));
         }
         saveState();
-        return i.reply({ content: `✅ Capacity set to ${newCap}.`, flags: MessageFlags.Ephemeral });
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        const summary = [`✅ Capacity set to ${newCap}.`];
+        if (promoted.length) summary.push(`Promoted ${promoted.length} from waitlist to seats.`);
+        if (demoted.length) summary.push(`Moved ${demoted.length} from seats to waitlist.`);
+        return i.reply({ content: summary.join(' '), flags: MessageFlags.Ephemeral });
       }
 
-      // voting commands
+      // Signup: reorderwaitlist (move user to position)
+      if (i.commandName === 'reorderwaitlist') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.Administrator)) return i.reply({ content: '❌ Need Admin.', flags: MessageFlags.Ephemeral });
+        const userOpt = i.options.getUser('user');
+        const posOpt = i.options.getInteger('position');
+        if (!userOpt || typeof posOpt !== 'number') {
+          return i.reply({ content: '❌ Missing user or position.', flags: MessageFlags.Ephemeral });
+        }
+        const userId = userOpt.id;
+        let position = posOpt;
+        if (!state.waitlist.includes(userId)) {
+          return i.reply({ content: '❌ User is not on the waitlist.', flags: MessageFlags.Ephemeral });
+        }
+        position = Math.max(1, Math.min(position, state.waitlist.length));
+        state.waitlist = state.waitlist.filter(id => id !== userId);
+        state.waitlist.splice(position - 1, 0, userId);
+        saveState();
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        return i.reply({ content: `✅ Moved <@${userId}> to position ${position} in the waitlist.`, flags: MessageFlags.Ephemeral });
+      }
+
+      // Voting commands
       if (i.commandName === 'vote') {
         const game = i.options.getString('game');
         const match = games.find(g => g.toLowerCase() === game.toLowerCase());
@@ -268,7 +354,7 @@ client.on(Events.InteractionCreate, async (i) => {
       if (i.commandName === 'votemessage') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
         const instr = new EmbedBuilder()
-          .setTitle("🗳️ LAN Game Voting")
+          .setTitle('🗳️ LAN Game Voting')
           .setColor(0x5865F2)
           .setDescription(`Use /vote, /unvote, /results.\nMax ${state.maxVotes} votes per user.`);
         await i.channel.send({ embeds: [instr] });
@@ -283,7 +369,7 @@ client.on(Events.InteractionCreate, async (i) => {
         state.votes = {};
         saveState();
         await updateVoteMessage(i.guild);
-        return i.reply({ content: `🗑️ Votes cleared.` });
+        return i.reply({ content: '🗑️ Votes cleared.' });
       }
     }
 
@@ -306,27 +392,69 @@ client.on(Events.InteractionCreate, async (i) => {
         modal.addComponents(new ActionRowBuilder().addComponents(nickInput), new ActionRowBuilder().addComponents(realInput));
         return i.showModal(modal);
       }
+
       if (i.customId === BUTTONS.LAN) {
         if (state.lan.includes(i.user.id)) msg = '✅ Already in LAN.';
-        else if (state.lan.length < state.capacity) { state.lan.push(i.user.id); msg = '✅ LAN seat taken.'; await swapRoles(member, roles, ROLES.LAN); }
-        else { if (!state.waitlist.includes(i.user.id)) state.waitlist.push(i.user.id); msg = `LAN full. Waitlist #${state.waitlist.indexOf(i.user.id)+1}`; await swapRoles(member, roles, ROLES.WAIT); }
+        else if (state.lan.length < state.capacity) {
+          removeFromAllLists(i.user.id);
+          state.lan.push(i.user.id);
+          msg = '✅ LAN seat taken.';
+          await swapRoles(member, roles, ROLES.LAN);
+        } else {
+          removeFromAllLists(i.user.id);
+          if (!state.waitlist.includes(i.user.id)) state.waitlist.push(i.user.id);
+          msg = 'LAN full. You have been placed on the waitlist.';
+          await swapRoles(member, roles, ROLES.WAIT);
+        }
+        saveState();
+        await i.reply({ content: msg, flags: MessageFlags.Ephemeral });
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        return;
       }
-      if (i.customId === BUTTONS.MAYBE) { if (!state.maybe.includes(i.user.id)) state.maybe.push(i.user.id); msg = '🟡 Maybe.'; await swapRoles(member, roles, ROLES.MAYBE); }
-      if (i.customId === BUTTONS.REMOTE) { if (!state.remote.includes(i.user.id)) state.remote.push(i.user.id); msg = '🔵 Remote.'; await swapRoles(member, roles, ROLES.REMOTE); }
+
+      if (i.customId === BUTTONS.MAYBE) {
+        removeFromAllLists(i.user.id);
+        if (!state.maybe.includes(i.user.id)) state.maybe.push(i.user.id);
+        msg = '🟡 Maybe.';
+        await swapRoles(member, roles, ROLES.MAYBE);
+        saveState();
+        await i.reply({ content: msg, flags: MessageFlags.Ephemeral });
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        return;
+      }
+
+      if (i.customId === BUTTONS.REMOTE) {
+        removeFromAllLists(i.user.id);
+        if (!state.remote.includes(i.user.id)) state.remote.push(i.user.id);
+        msg = '🔵 Remote.';
+        await swapRoles(member, roles, ROLES.REMOTE);
+        saveState();
+        await i.reply({ content: msg, flags: MessageFlags.Ephemeral });
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        return;
+      }
+
       if (i.customId === BUTTONS.NOT) {
-        state.lan = state.lan.filter(x=>x!==i.user.id);
-        state.maybe = state.maybe.filter(x=>x!==i.user.id);
-        state.remote = state.remote.filter(x=>x!==i.user.id);
-        state.waitlist = state.waitlist.filter(x=>x!==i.user.id);
+        removeFromAllLists(i.user.id);
         msg = '🚫 Not attending. Roles cleared.';
         await member.roles.remove(Object.values(roles).map(r => r.id)).catch(()=>{});
         try { await member.setNickname(null); } catch {}
-      }
-      saveState();
-      await i.reply({ content: msg, flags: MessageFlags.Ephemeral });
-      if (state.panelMessageId && state.signupChannelId) {
-        const ch = await i.guild.channels.fetch(state.signupChannelId);
-        await refreshPanel(ch, state.panelMessageId);
+        saveState();
+        await i.reply({ content: msg, flags: MessageFlags.Ephemeral });
+        if (state.panelMessageId && state.signupChannelId) {
+          const ch = await i.guild.channels.fetch(state.signupChannelId);
+          await refreshPanel(ch, state.panelMessageId);
+        }
+        return;
       }
     }
 
@@ -356,8 +484,8 @@ client.on(Events.InteractionCreate, async (i) => {
       await i.update({ content: `🗑️ Removed vote for ${game}`, components: [] });
     }
   } catch (err) {
-    console.error("Interaction error:", err);
-    try { await i.reply({ content: "⚠️ Something went wrong.", flags: MessageFlags.Ephemeral }); } catch {}
+    console.error('Interaction error:', err);
+    try { await i.reply({ content: '⚠️ Something went wrong.', flags: MessageFlags.Ephemeral }); } catch {}
   }
 });
 
