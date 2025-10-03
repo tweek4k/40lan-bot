@@ -165,12 +165,12 @@ client.once(Events.ClientReady, async () => {
   await ensureRoles(guild);
 
   await guild.commands.set([
-  { name: 'waitlist', description: 'Admin: view waitlist and order', options: [] },
+  { name: 'waitlist', description: 'Admin: view waitlist and order', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [] },
     // Signup commands
-    { name: 'postsignup', description: 'Post the signup panel', options: [{ type: 4, name: 'capacity', description: 'Seat capacity', required: false }] },
-    { name: 'setcapacity', description: 'Set LAN seat capacity', options: [{ type: 4, name: 'capacity', description: 'New seat capacity', required: true }] },
-    { name: 'clearstatus', description: 'Clear a user’s status', options: [{ type: 6, name: 'user', description: 'User to clear', required: true }] },
-    { name: 'export', description: 'Export CSV of signups' },
+  { name: 'postsignup', description: 'Post the signup panel', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'capacity', description: 'Seat capacity', required: false }] },
+  { name: 'setcapacity', description: 'Set LAN seat capacity', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'capacity', description: 'New seat capacity', required: true }] },
+  { name: 'clearstatus', description: 'Clear a user’s status', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 6, name: 'user', description: 'User to clear', required: true }] },
+  { name: 'export', description: 'Export CSV of signups', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
     { name: 'name', description: 'Set your display to "nick - real name"' },
 
     // Voting
@@ -179,10 +179,11 @@ client.once(Events.ClientReady, async () => {
     { name: 'results', description: 'Show votes' },
     { name: 'suggestgame', description: 'Add a new game', options: [{ type: 3, name: 'title', description: 'Game title', required: true }] },
     { name: 'setmaxvotes', description: 'Set max votes per user', options: [{ type: 4, name: 'number', description: 'Max votes', required: true }] },
-    { name: 'votemessage', description: 'Post voting instructions' },
+  { name: 'votemessage', description: 'Post voting instructions', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
+  { name: 'postvotesnapshot', description: 'Admin: post a snapshot of current vote results', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
     { name: 'votereset', description: 'Clear all votes' }
     ,
-    { name: 'reorderwaitlist', description: 'Admin: move user in waitlist', options: [
+  { name: 'reorderwaitlist', description: 'Admin: move user in waitlist', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 6, name: 'user', description: 'User to move', required: true },
       { type: 4, name: 'position', description: 'New position (1 = top)', required: true }
     ] }
@@ -201,6 +202,12 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
+      if (i.commandName === 'postvotesnapshot') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        const snapshot = voteResultsEmbed();
+        await i.channel.send({ embeds: [snapshot] });
+        return i.reply({ content: '🧾 Posted vote snapshot in this channel.', flags: MessageFlags.Ephemeral });
+      }
       // Admin: view waitlist
       if (i.commandName === 'waitlist') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.Administrator)) return i.reply({ content: '❌ Need Admin.', flags: MessageFlags.Ephemeral });
