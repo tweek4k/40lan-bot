@@ -616,12 +616,14 @@ client.on(Events.InteractionCreate, async (i) => {
         const sub = i.options.getSubcommand();
         if (sub === 'edit') {
           const modal = new ModalBuilder().setCustomId(POLL_MODAL[which]).setTitle(which === POLL.LONG ? 'Edit Long-format choices' : 'Edit Short-format choices');
+          const existing = (getPollByName(which)?.choices || []).join('\n');
           const input = new TextInputBuilder()
             .setCustomId(POLL_INPUT[which])
             .setLabel('Enter one choice per line')
             .setStyle(TextInputStyle.Paragraph)
             .setRequired(true)
-            .setPlaceholder('Game A\nGame B\nGame C');
+            .setPlaceholder('Game A\\nGame B\\nGame C');
+          if (existing.length > 0) input.setValue(existing);
           modal.addComponents(new ActionRowBuilder().addComponents(input));
           return i.showModal(modal);
         }
