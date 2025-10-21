@@ -597,6 +597,15 @@ client.on(Events.InteractionCreate, async (i) => {
             rows[rows.length - 1].addComponents(btn);
           }
         });
+        // Add a clear selection button on its own row
+        if (poll.choices.length > 0) {
+          const clearBtn = new ButtonBuilder()
+            .setCustomId(`${which}_clear`)
+            .setStyle(ButtonStyle.Secondary)
+            .setLabel('Clear my selection')
+            .setDisabled(disabled);
+          rows.push(new ActionRowBuilder().addComponents(clearBtn));
+        }
         return rows;
       }
       async function updatePollMessage(guild, which) {
@@ -1044,11 +1053,76 @@ client.on(Events.InteractionCreate, async (i) => {
             if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
             else rows[rows.length - 1].addComponents(btn);
           });
+          if (poll.choices.length > 0) {
+            const clearBtn = new ButtonBuilder()
+              .setCustomId(`${which}_clear`)
+              .setStyle(ButtonStyle.Secondary)
+              .setLabel('Clear my selection')
+              .setDisabled(!poll.active);
+            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+          }
           const ch = await i.guild.channels.fetch(poll.channelId);
           const msg = await ch.messages.fetch(poll.messageId);
           await msg.edit({ embeds: [embed], components: rows });
         } catch {}
         return i.reply({ content: `✅ Selected: ${poll.choices[idx]}`, flags: MessageFlags.Ephemeral });
+      }
+      // Long/Short clear selection
+      if (i.customId === 'long_clear' || i.customId === 'short_clear') {
+        const which = i.customId.startsWith('long') ? 'long' : 'short';
+        const poll = which === 'long' ? state.longPoll : state.shortPoll;
+        if (!poll.active) return i.reply({ content: '⚠️ Poll is not active.', flags: MessageFlags.Ephemeral });
+        if (poll.selections[i.user.id] === undefined) {
+          return i.reply({ content: 'ℹ️ You don\'t have a selection to clear.', flags: MessageFlags.Ephemeral });
+        }
+        delete poll.selections[i.user.id];
+        if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
+        saveState();
+        try {
+          // Rebuild embed and rows
+          const embed = (function(){
+            const p = poll;
+            const e = new EmbedBuilder()
+              .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
+              .setColor(which === 'long' ? 0x9b59b6 : 0xf1c40f)
+              .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
+            if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
+            for (let j = 0; j < p.choices.length; j++) {
+              const name = p.choices[j];
+              const usersIn = Object.entries(p.selections).filter(([, c]) => c === j).map(([uid]) => `<@${uid}>`);
+              let value = '(empty)';
+              if (usersIn.length > 0) {
+                const shown = usersIn.slice(0, 20);
+                value = shown.join(', ');
+                if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
+              }
+              e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
+            }
+            return e;
+          })();
+          const rows = [];
+          poll.choices.slice(0, 25).forEach((label, k) => {
+            const btn = new ButtonBuilder()
+              .setCustomId(`${which}_select_${k}`)
+              .setStyle(which === 'long' ? ButtonStyle.Primary : ButtonStyle.Success)
+              .setLabel(label)
+              .setDisabled(!poll.active);
+            if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
+            else rows[rows.length - 1].addComponents(btn);
+          });
+          if (poll.choices.length > 0) {
+            const clearBtn = new ButtonBuilder()
+              .setCustomId(`${which}_clear`)
+              .setStyle(ButtonStyle.Secondary)
+              .setLabel('Clear my selection')
+              .setDisabled(!poll.active);
+            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+          }
+          const ch = await i.guild.channels.fetch(poll.channelId);
+          const msg = await ch.messages.fetch(poll.messageId);
+          await msg.edit({ embeds: [embed], components: rows });
+        } catch {}
+        return i.reply({ content: '🧹 Cleared your selection.', flags: MessageFlags.Ephemeral });
       }
       // Game signup leave
       if (i.customId === GAME_SIGNUP.LEAVE) {
@@ -1224,6 +1298,14 @@ client.on(Events.InteractionCreate, async (i) => {
             if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
             else rows[rows.length - 1].addComponents(btn);
           });
+          if (poll.choices.length > 0) {
+            const clearBtn = new ButtonBuilder()
+              .setCustomId(`${which}_clear`)
+              .setStyle(ButtonStyle.Secondary)
+              .setLabel('Clear my selection')
+              .setDisabled(!poll.active);
+            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+          }
           const ch = await i.guild.channels.fetch(poll.channelId);
           const msg = await ch.messages.fetch(poll.messageId);
           await msg.edit({ embeds: [embed], components: rows });
