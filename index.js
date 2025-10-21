@@ -474,52 +474,14 @@ client.once(Events.ClientReady, async () => {
   await ensureRoles(guild);
 
   await guild.commands.set([
-  { name: 'waitlist', description: 'Admin: view waitlist and order', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [] },
-    // Signup commands
-  { name: 'postsignup', description: 'Post the signup panel', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'capacity', description: 'Seat capacity', required: false }] },
-  { name: 'setcapacity', description: 'Set LAN seat capacity', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'capacity', description: 'New seat capacity', required: true }] },
-  { name: 'clearstatus', description: 'Clear a user’s status', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 6, name: 'user', description: 'User to clear', required: true }] },
-  { name: 'export', description: 'Export CSV of signups', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-  { name: 'name', description: 'Set your display to "nick - real name"', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-
-    // Voting
-    { name: 'vote', description: 'Vote for a game', options: [{ type: 3, name: 'game', description: 'Game name', required: true, autocomplete: true }] },
-    { name: 'unvote', description: 'Remove one of your votes' },
-  { name: 'results', description: 'Show votes', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    { name: 'suggestgame', description: 'Add a new game', options: [{ type: 3, name: 'title', description: 'Game title', required: true }] },
-  { name: 'setmaxvotes', description: 'Set max votes per user', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [{ type: 4, name: 'number', description: 'Max votes', required: true }] },
-  { name: 'votestart', description: 'Start a voting session (posts instructions and results)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [ { type: 4, name: 'maxvotes', description: 'Override max votes per user', required: false }, { type: 3, name: 'text', description: 'Label for this vote (e.g., time or name)', required: false } ] },
-  { name: 'votestop', description: 'Stop the voting session and finalize results', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild }
-    ,
-  { name: 'reorderwaitlist', description: 'Admin: move user in waitlist', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
-      { type: 6, name: 'user', description: 'User to move', required: true },
-      { type: 4, name: 'position', description: 'New position (1 = top)', required: true }
-    ] },
-    // Game signup commands
-    { name: 'gamesignup_start', description: 'Admin: start a game signup session', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
-      { type: 3, name: 'games', description: 'Comma-separated. Use "Name (4)" for per-game caps.', required: true },
-      { type: 4, name: 'defaultmax', description: 'Default slots per game', required: false },
-      { type: 3, name: 'label', description: 'Label for this session (e.g., Saturday long-format)', required: false },
-      { type: 3, name: 'sheetid', description: 'Google Sheet ID (optional)', required: false },
-      { type: 3, name: 'sheettab', description: 'Sheet tab name (e.g., Sheet1)', required: false }
-    ] },
-    { name: 'gamesignup_stop', description: 'Admin: stop the game signup session', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    { name: 'gamesignup_export', description: 'Admin: export the current game signup overview (ephemeral)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    // Sheet signup commands
-    { name: 'signup-start', description: 'Admin: start a Sheet-driven signup (tab name in your sheet)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
-      { type: 3, name: 'tab', description: 'Tab (sheet) name, e.g., long-format', required: true },
-      { type: 3, name: 'label', description: 'Optional label shown in title', required: false },
-      { type: 3, name: 'sheetid', description: 'Override Google Sheet ID (optional)', required: false }
-    ] },
-    { name: 'signup-stop', description: 'Admin: stop the current Sheet-driven signup', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    // Long/Short single-choice polls
-  { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
+    // Only keep the new poll commands
+    { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
       { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
       { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
       { type: 1, name: 'unpause', description: 'Unpause the poll (enable buttons)' }
     ] },
-  { name: 'short', description: 'Admin: manage Short-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
+    { name: 'short', description: 'Admin: manage Short-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
       { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
       { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
