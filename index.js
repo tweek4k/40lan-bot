@@ -7,6 +7,7 @@ import {
   PermissionsBitField, MessageFlags
 } from 'discord.js';
 import fs from 'fs';
+import { google } from 'googleapis';
 
 // ----------------- client setup -----------------
 const client = new Client({
@@ -26,6 +27,10 @@ const BUTTONS = {
   REMOTE: 'join_remote',
   NAME: 'set_name',
   NOT: 'not_attending'
+};
+const GAME_SIGNUP = {
+  SELECT: 'game_signup_select',
+  LEAVE: 'game_signup_leave'
 };
 const MODAL_ID = 'name_modal';
 const NICK_ID = 'nick_input';
@@ -51,6 +56,16 @@ if (!state.panelMessageId) state.panelMessageId = null;
 if (!state.signupChannelId) state.signupChannelId = null;
 if (typeof state.votingActive === 'undefined') state.votingActive = false;
 if (typeof state.voteLabel === 'undefined') state.voteLabel = null;
+if (!state.gameSignup) {
+  state.gameSignup = {
+    active: false,
+    label: null,
+    games: [], // [{ name, max, members: [userId,...] }]
+    messageId: null,
+    channelId: null,
+    sheet: null // { id, tab }
+  };
+}
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
@@ -146,6 +161,113 @@ function tallyVotes() {
   }
   return Object.entries(tally).sort((a,b) => b[1]-a[1]);
 }
+
+// ----------------- game signup helpers -----------------
+function parseGamesInput(input, defaultMax = 4) {
+  return input
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(token => {
+      const m = token.match(/^(.*?)(?:\s*\((\d+)\))?$/);
+      const name = (m?.[1] || token).trim();
+      const max = m?.[2] ? parseInt(m[2], 10) : defaultMax;
+      return { name, max: Math.max(1, max), members: [] };
+    });
+}
+function gameSignupEmbed(guildName) {
+  const e = new EmbedBuilder()
+    .setTitle(`📝 Game Signup${state.gameSignup.label ? ' — ' + state.gameSignup.label : ''}`)
+    .setColor(0x2ecc71)
+    .setDescription('Pick a game from the dropdown to join. You can only be in one game at a time.')
+    .addFields(
+      ...state.gameSignup.games.map(g => ({
+        name: `${g.name} (${g.members.length}/${g.max})`,
+        value: g.members.length ? g.members.map(id => `- <@${id}>`).join('\n') : '(empty)',
+        inline: false
+      }))
+    );
+  if (!state.gameSignup.games.length) e.addFields({ name: 'No games configured', value: 'Ask an admin to start a session.' });
+  return e;
+}
+function gameSignupComponents() {
+  if (!state.gameSignup.active) return [];
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(GAME_SIGNUP.SELECT)
+    .setPlaceholder('Choose a game to join')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(
+      state.gameSignup.games.slice(0, 25).map((g, idx) => ({
+        label: g.name,
+        value: String(idx),
+        description: `${g.members.length}/${g.max} players`
+      }))
+    );
+  const row1 = new ActionRowBuilder().addComponents(select);
+  const leaveBtn = new ButtonBuilder()
+    .setCustomId(GAME_SIGNUP.LEAVE)
+    .setLabel('Leave current game')
+    .setStyle(ButtonStyle.Danger);
+  const row2 = new ActionRowBuilder().addComponents(leaveBtn);
+  return [row1, row2];
+}
+async function updateGameSignupMessage(guild) {
+  if (!state.gameSignup.messageId || !state.gameSignup.channelId) return;
+  try {
+    const ch = await guild.channels.fetch(state.gameSignup.channelId);
+    const msg = await ch.messages.fetch(state.gameSignup.messageId);
+    await msg.edit({ embeds: [gameSignupEmbed(guild.name)], components: gameSignupComponents() });
+  } catch {}
+}
+function removeUserFromAllGames(userId) {
+  for (const g of state.gameSignup.games) {
+    g.members = g.members.filter(id => id !== userId);
+  }
+}
+function getSheetsClientOrNull() {
+  const email = process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
+  const key = process.env.GOOGLE_SHEETS_PRIVATE_KEY?.replace(/\\n/g, '\n');
+  if (!email || !key) return null;
+  const auth = new google.auth.JWT(email, undefined, key, ['https://www.googleapis.com/auth/spreadsheets']);
+  return google.sheets({ version: 'v4', auth });
+}
+async function syncGameSignupToSheet(guild) {
+  try {
+    if (!state.gameSignup.sheet?.id || !state.gameSignup.sheet?.tab) return;
+    const sheets = getSheetsClientOrNull();
+    if (!sheets) return;
+
+    const header = ['Game', 'Max', 'Count', 'Players...'];
+    const values = [header];
+
+    const nameOf = async (id) => {
+      try {
+        const cached = guild.members.cache.get(id);
+        const m = cached || await guild.members.fetch(id);
+        return m?.displayName || m?.user?.username || `<@${id}>`;
+      } catch {
+        return `<@${id}>`;
+      }
+    };
+
+    for (const g of state.gameSignup.games) {
+      const names = await Promise.all(g.members.map(id => nameOf(id)));
+      values.push([g.name, String(g.max), String(g.members.length), ...names]);
+    }
+
+    const range = `${state.gameSignup.sheet.tab}!A1:Z1000`;
+    await sheets.spreadsheets.values.clear({ spreadsheetId: state.gameSignup.sheet.id, range });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: state.gameSignup.sheet.id,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: { values }
+    });
+  } catch (e) {
+    console.error('Sheet sync error:', e.message);
+  }
+}
 function voteResultsEmbed() {
   const sorted = tallyVotes();
   const suffix = state.voteLabel ? ` — ${state.voteLabel}` : '';
@@ -208,7 +330,17 @@ client.once(Events.ClientReady, async () => {
   { name: 'reorderwaitlist', description: 'Admin: move user in waitlist', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 6, name: 'user', description: 'User to move', required: true },
       { type: 4, name: 'position', description: 'New position (1 = top)', required: true }
-    ] }
+    ] },
+    // Game signup commands
+    { name: 'gamesignup_start', description: 'Admin: start a game signup session', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
+      { type: 3, name: 'games', description: 'Comma-separated. Use "Name (4)" for per-game caps.', required: true },
+      { type: 4, name: 'defaultmax', description: 'Default slots per game', required: false },
+      { type: 3, name: 'label', description: 'Label for this session (e.g., Saturday long-format)', required: false },
+      { type: 3, name: 'sheetid', description: 'Google Sheet ID (optional)', required: false },
+      { type: 3, name: 'sheettab', description: 'Sheet tab name (e.g., Sheet1)', required: false }
+    ] },
+    { name: 'gamesignup_stop', description: 'Admin: stop the game signup session', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
+    { name: 'gamesignup_export', description: 'Admin: export the current game signup overview (ephemeral)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild }
   ]);
 });
 
@@ -234,6 +366,58 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
+      // Game signup: start
+      if (i.commandName === 'gamesignup_start') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        const gamesStr = i.options.getString('games');
+        const defMax = i.options.getInteger('defaultmax') || 4;
+        const label = i.options.getString('label');
+        const sheetId = i.options.getString('sheetid');
+        const sheetTab = i.options.getString('sheettab');
+
+        state.gameSignup.active = true;
+        state.gameSignup.label = label?.trim() || null;
+        state.gameSignup.games = parseGamesInput(gamesStr, defMax);
+        state.gameSignup.channelId = i.channel.id;
+        state.gameSignup.messageId = null;
+        state.gameSignup.sheet = (sheetId && sheetTab) ? { id: sheetId.trim(), tab: sheetTab.trim() } : null;
+        saveState();
+
+        const msg = await i.channel.send({ embeds: [gameSignupEmbed(i.guild.name)], components: gameSignupComponents() });
+        state.gameSignup.messageId = msg.id;
+        saveState();
+        await syncGameSignupToSheet(i.guild);
+        return i.reply({ content: `🟢 Game signup started${state.gameSignup.label ? ` — ${state.gameSignup.label}` : ''}.`, flags: MessageFlags.Ephemeral });
+      }
+
+      // Game signup: stop
+      if (i.commandName === 'gamesignup_stop') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        state.gameSignup.active = false;
+        saveState();
+        await updateGameSignupMessage(i.guild);
+        await syncGameSignupToSheet(i.guild);
+        return i.reply({ content: '🛑 Game signup stopped. Controls disabled.', flags: MessageFlags.Ephemeral });
+      }
+
+      // Game signup: export (ephemeral)
+      if (i.commandName === 'gamesignup_export') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        const lines = [];
+        const now = new Date();
+        lines.push(`Game Signup — ${now.toLocaleString()}${state.gameSignup.label ? ` — ${state.gameSignup.label}` : ''}`);
+        if (!state.gameSignup.games.length) return i.reply({ content: 'No games configured.', flags: MessageFlags.Ephemeral });
+        for (const g of state.gameSignup.games) {
+          lines.push(`${g.name} (${g.members.length}/${g.max})`);
+          lines.push(g.members.length ? g.members.map(id => `- <@${id}>`).join('\n') : '(empty)');
+          lines.push('');
+        }
+        const text = lines.join('\n');
+        const content = '```text\n' + text + '\n```';
+        if (content.length <= 1900) return i.reply({ content, flags: MessageFlags.Ephemeral });
+        const buf = Buffer.from(text, 'utf8');
+        return i.reply({ content: '📄 Overview attached.', files: [{ attachment: buf, name: `game-signup-${Date.now()}.txt` }], flags: MessageFlags.Ephemeral });
+      }
       // Voting session controls
       if (i.commandName === 'votestart') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
@@ -329,10 +513,20 @@ client.on(Events.InteractionCreate, async (i) => {
         lines.push(`Overview — ${now.toLocaleString()}`);
         lines.push(`Seats: ${state.lan.length}/${state.capacity} • Maybe: ${state.maybe.length} • Remote: ${state.remote.length} • Waitlist: ${state.waitlist.length}`);
 
-        const lanList = state.lan.map(id => `- <@${id}>`).join('\n') || '(none)';
-        const waitList = state.waitlist.map((id, idx) => `${idx + 1}. <@${id}>`).join('\n') || '(empty)';
-        const maybeList = state.maybe.map(id => `- <@${id}>`).join('\n') || '(none)';
-        const remoteList = state.remote.map(id => `- <@${id}>`).join('\n') || '(none)';
+        const nameOf = async (guild, id) => {
+          try {
+            const cached = guild.members.cache.get(id);
+            const m = cached || await guild.members.fetch(id);
+            return m?.displayName || m?.user?.username || `Unknown (${id})`;
+          } catch {
+            return `Unknown (${id})`;
+          }
+        };
+
+  const lanList = (await Promise.all(state.lan.map(async id => `- ${await nameOf(i.guild, id)}`))).join('\n') || '(none)';
+  const waitList = (await Promise.all(state.waitlist.map(async (id, idx) => `${idx + 1}. ${await nameOf(i.guild, id)}`))).join('\n') || '(empty)';
+  const maybeList = (await Promise.all(state.maybe.map(async id => `- ${await nameOf(i.guild, id)}`))).join('\n') || '(none)';
+  const remoteList = (await Promise.all(state.remote.map(async id => `- ${await nameOf(i.guild, id)}`))).join('\n') || '(none)';
 
         lines.push('LAN:\n' + lanList);
         lines.push('Waitlist:\n' + waitList);
@@ -476,6 +670,15 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Button handlers
     if (i.isButton()) {
+      // Game signup leave
+      if (i.customId === GAME_SIGNUP.LEAVE) {
+        if (!state.gameSignup.active) return i.reply({ content: '⚠️ No active game signup.', flags: MessageFlags.Ephemeral });
+        removeUserFromAllGames(i.user.id);
+        saveState();
+        await updateGameSignupMessage(i.guild);
+        await syncGameSignupToSheet(i.guild);
+        return i.reply({ content: '✅ You left your game.', flags: MessageFlags.Ephemeral });
+      }
       const roles = await ensureRoles(i.guild);
       const member = await i.guild.members.fetch(i.user.id);
 
@@ -583,6 +786,21 @@ client.on(Events.InteractionCreate, async (i) => {
       saveState();
       await updateVoteMessage(i.guild);
       await i.update({ content: `🗑️ Removed vote for ${game}`, components: [] });
+    }
+    // Game signup selection
+    if (i.isStringSelectMenu() && i.customId === GAME_SIGNUP.SELECT) {
+      if (!state.gameSignup.active) return i.reply({ content: '⚠️ No active game signup.', flags: MessageFlags.Ephemeral });
+      const selectedIndex = parseInt(i.values[0], 10);
+      const game = state.gameSignup.games[selectedIndex];
+      if (!game) return i.reply({ content: '❌ Invalid selection.', flags: MessageFlags.Ephemeral });
+      if (game.members.includes(i.user.id)) return i.reply({ content: `✅ Already in ${game.name}.`, flags: MessageFlags.Ephemeral });
+      if (game.members.length >= game.max) return i.reply({ content: `⛔ ${game.name} is full.`, flags: MessageFlags.Ephemeral });
+      removeUserFromAllGames(i.user.id);
+      game.members.push(i.user.id);
+      saveState();
+      await updateGameSignupMessage(i.guild);
+      await syncGameSignupToSheet(i.guild);
+      return i.reply({ content: `✅ Joined ${game.name}.`, flags: MessageFlags.Ephemeral });
     }
   } catch (err) {
     console.error('Interaction error:', err);
