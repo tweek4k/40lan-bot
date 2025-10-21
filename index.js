@@ -217,8 +217,18 @@ client.on(Events.InteractionCreate, async (i) => {
   try {
     // Autocomplete for /vote
     if (i.isAutocomplete()) {
-      const focused = i.options.getFocused();
-      const filtered = games.filter(g => g.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
+      const q = i.options.getFocused().trim().toLowerCase();
+
+      // Require at least 2 characters before suggesting anything
+      if (q.length < 2) {
+        return i.respond([]);
+      }
+
+      // Rank prefix matches first, then substring matches
+      const starts = games.filter(g => g.toLowerCase().startsWith(q));
+      const contains = games.filter(g => !g.toLowerCase().startsWith(q) && g.toLowerCase().includes(q));
+
+      const filtered = [...starts, ...contains].slice(0, 25); // Discord limit
       return i.respond(filtered.map(g => ({ name: g, value: g })));
     }
 
@@ -307,6 +317,41 @@ client.on(Events.InteractionCreate, async (i) => {
           await refreshPanel(ch, state.panelMessageId);
         }
         return i.reply({ content: `✅ Cleared status for <@${userId}>.`, flags: MessageFlags.Ephemeral });
+      }
+
+      // Admin: export overview ephemerally (fallback to file if long)
+      if (i.commandName === 'export') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) {
+          return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        }
+        const lines = [];
+        const now = new Date();
+        lines.push(`Overview — ${now.toLocaleString()}`);
+        lines.push(`Seats: ${state.lan.length}/${state.capacity} • Maybe: ${state.maybe.length} • Remote: ${state.remote.length} • Waitlist: ${state.waitlist.length}`);
+
+        const lanList = state.lan.map(id => `- <@${id}>`).join('\n') || '(none)';
+        const waitList = state.waitlist.map((id, idx) => `${idx + 1}. <@${id}>`).join('\n') || '(empty)';
+        const maybeList = state.maybe.map(id => `- <@${id}>`).join('\n') || '(none)';
+        const remoteList = state.remote.map(id => `- <@${id}>`).join('\n') || '(none)';
+
+        lines.push('LAN:\n' + lanList);
+        lines.push('Waitlist:\n' + waitList);
+        lines.push('Maybe:\n' + maybeList);
+        lines.push('Remote:\n' + remoteList);
+
+        const text = lines.join('\n\n');
+        const content = '```text\n' + text + '\n```';
+
+        if (content.length <= 1900) {
+          return i.reply({ content, flags: MessageFlags.Ephemeral });
+        } else {
+          const buf = Buffer.from(text, 'utf8');
+          return i.reply({
+            content: '📄 Overview attached.',
+            files: [{ attachment: buf, name: `lan-overview-${Date.now()}.txt` }],
+            flags: MessageFlags.Ephemeral
+          });
+        }
       }
 
       // Signup: setcapacity
