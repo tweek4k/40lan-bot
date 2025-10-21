@@ -515,13 +515,15 @@ client.once(Events.ClientReady, async () => {
     // Long/Short single-choice polls
     { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
-      { type: 1, name: 'start', description: 'Start the poll in this channel' },
-      { type: 1, name: 'stop', description: 'Stop the poll and freeze results' }
+      { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
+      { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
+      { type: 1, name: 'unpause', description: 'Unpause the poll (enable buttons)' }
     ] },
     { name: 'short', description: 'Admin: manage Short-format poll', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
-      { type: 1, name: 'start', description: 'Start the poll in this channel' },
-      { type: 1, name: 'stop', description: 'Stop the poll and freeze results' }
+      { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
+      { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
+      { type: 1, name: 'unpause', description: 'Unpause the poll (enable buttons)' }
     ] }
   ]);
 });
@@ -641,6 +643,8 @@ client.on(Events.InteractionCreate, async (i) => {
           if (!poll.choices.length) return i.reply({ content: '⚠️ No choices yet. Use /' + which + ' edit first.', flags: MessageFlags.Ephemeral });
           // clamp to 25 choices
           if (poll.choices.length > maxButtons) poll.choices = poll.choices.slice(0, maxButtons);
+          // Clear previous selections when starting a new run
+          poll.selections = {};
           poll.active = true;
           poll.channelId = i.channel.id;
           // If previous message exists, delete it to keep one active panel
@@ -658,13 +662,28 @@ client.on(Events.InteractionCreate, async (i) => {
           saveState();
           return i.reply({ content: `🟢 ${which === POLL.LONG ? 'Long' : 'Short'} poll started.`, flags: MessageFlags.Ephemeral });
         }
-        if (sub === 'stop') {
+        if (sub === 'pause') {
           const poll = getPollByName(which);
           poll.active = false;
           setPollByName(which, poll);
           saveState();
           await updatePollMessage(i.guild, which);
-          return i.reply({ content: `🛑 ${which === POLL.LONG ? 'Long' : 'Short'} poll stopped.`, flags: MessageFlags.Ephemeral });
+          return i.reply({ content: `⏸️ ${which === POLL.LONG ? 'Long' : 'Short'} poll paused.`, flags: MessageFlags.Ephemeral });
+        }
+        if (sub === 'unpause') {
+          const poll = getPollByName(which);
+          poll.active = true;
+          // If message was lost, re-post with existing selections
+          if (!poll.messageId || !poll.channelId) {
+            poll.channelId = i.channel.id;
+            const msg = await i.channel.send({ embeds: [pollEmbed(which, i.guild.name)], components: pollComponents(which) });
+            poll.messageId = msg.id;
+          } else {
+            await updatePollMessage(i.guild, which);
+          }
+          setPollByName(which, poll);
+          saveState();
+          return i.reply({ content: `▶️ ${which === POLL.LONG ? 'Long' : 'Short'} poll unpaused.`, flags: MessageFlags.Ephemeral });
         }
       }
       // Game signup: start
@@ -1267,10 +1286,21 @@ client.on(Events.InteractionCreate, async (i) => {
       const which = i.customId.startsWith('long') ? 'long' : 'short';
       const inputId = which === 'long' ? 'long_choices_input' : 'short_choices_input';
       const raw = i.fields.getTextInputValue(inputId) || '';
-      const choices = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      const newChoices = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean).slice(0, 25);
       const poll = which === 'long' ? state.longPoll : state.shortPoll;
-      poll.choices = choices.slice(0, 25);
-      poll.selections = {}; // reset selections on edit
+      const oldChoices = poll.choices || [];
+      // Remap selections to still-present choices (case-insensitive)
+      const nameToNewIndex = new Map(newChoices.map((name, idx) => [name.toLowerCase(), idx]));
+      const remapped = {};
+      for (const [userId, oldIdx] of Object.entries(poll.selections || {})) {
+        const oldName = oldChoices[oldIdx];
+        if (typeof oldName === 'string') {
+          const newIdx = nameToNewIndex.get(oldName.toLowerCase());
+          if (typeof newIdx === 'number') remapped[userId] = newIdx;
+        }
+      }
+      poll.choices = newChoices;
+      poll.selections = remapped;
       if ((which === 'long')) state.longPoll = poll; else state.shortPoll = poll;
       saveState();
       // If active and message exists, refresh panel
@@ -1284,7 +1314,15 @@ client.on(Events.InteractionCreate, async (i) => {
               .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
             if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
             for (let j = 0; j < p.choices.length; j++) {
-              e.addFields({ name: `${p.choices[j]} (0)`, value: '(empty)', inline: false });
+              const name = p.choices[j];
+              const usersIn = Object.entries(p.selections).filter(([, c]) => c === j).map(([uid]) => `<@${uid}>`);
+              let value = '(empty)';
+              if (usersIn.length > 0) {
+                const shown = usersIn.slice(0, 20);
+                value = shown.join(', ');
+                if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
+              }
+              e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
             }
             return e;
           })();
@@ -1311,7 +1349,7 @@ client.on(Events.InteractionCreate, async (i) => {
           await msg.edit({ embeds: [embed], components: rows });
         } catch {}
       }
-      return i.reply({ content: `✅ Updated ${which} choices (${choices.length} items).`, flags: MessageFlags.Ephemeral });
+  return i.reply({ content: `✅ Updated ${which} choices (${newChoices.length} items).`, flags: MessageFlags.Ephemeral });
     }
     // Game signup selection
     if (i.isStringSelectMenu() && i.customId === GAME_SIGNUP.SELECT) {
