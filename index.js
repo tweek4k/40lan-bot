@@ -32,6 +32,10 @@ const GAME_SIGNUP = {
   SELECT: 'game_signup_select',
   LEAVE: 'game_signup_leave'
 };
+const SHEET_SIGNUP = {
+  SELECT: 'sheet_signup_select',
+  LEAVE: 'sheet_signup_leave'
+};
 const MODAL_ID = 'name_modal';
 const NICK_ID = 'nick_input';
 const REAL_ID = 'real_input';
@@ -65,6 +69,24 @@ if (!state.gameSignup) {
     channelId: null,
     sheet: null // { id, tab }
   };
+}
+if (!state.sheetSignup) {
+  state.sheetSignup = {
+    active: false,
+    label: null,
+    sheetId: null,
+    tab: null,
+    choices: [],
+    messageId: null,
+    channelId: null
+  };
+}
+// New: single-choice polls for long/short formats
+if (!state.longPoll) {
+  state.longPoll = { active: false, choices: [], selections: {}, messageId: null, channelId: null };
+}
+if (!state.shortPoll) {
+  state.shortPoll = { active: false, choices: [], selections: {}, messageId: null, channelId: null };
 }
 
 function loadState() {
@@ -225,17 +247,31 @@ function removeUserFromAllGames(userId) {
     g.members = g.members.filter(id => id !== userId);
   }
 }
-function getSheetsClientOrNull() {
+async function getSheetsClientOrNull() {
   const email = process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
-  const key = process.env.GOOGLE_SHEETS_PRIVATE_KEY?.replace(/\\n/g, '\n');
-  if (!email || !key) return null;
-  const auth = new google.auth.JWT(email, undefined, key, ['https://www.googleapis.com/auth/spreadsheets']);
-  return google.sheets({ version: 'v4', auth });
+  let key = process.env.GOOGLE_SHEETS_PRIVATE_KEY;
+  if (!email || !key) {
+    console.warn('Sheets auth not configured: missing ' + (!email ? 'GOOGLE_SHEETS_CLIENT_EMAIL ' : '') + (!key ? 'GOOGLE_SHEETS_PRIVATE_KEY' : ''));
+    return null;
+  }
+  // Handle "\n" escaped newlines in .env
+  key = key.replace(/\\n/g, '\n');
+  try {
+    const auth = new google.auth.GoogleAuth({
+      credentials: { client_email: email, private_key: key },
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    const client = await auth.getClient();
+    return google.sheets({ version: 'v4', auth: client });
+  } catch (err) {
+    console.error('Google Sheets auth error:', err.response?.data || err.message || err);
+    return null;
+  }
 }
 async function syncGameSignupToSheet(guild) {
   try {
     if (!state.gameSignup.sheet?.id || !state.gameSignup.sheet?.tab) return;
-    const sheets = getSheetsClientOrNull();
+    const sheets = await getSheetsClientOrNull();
     if (!sheets) return;
 
     const header = ['Game', 'Max', 'Count', 'Players...'];
@@ -267,6 +303,134 @@ async function syncGameSignupToSheet(guild) {
   } catch (e) {
     console.error('Sheet sync error:', e.message);
   }
+}
+
+// ----------------- sheet-driven signup helpers -----------------
+function colIndexToLetter(idx) {
+  let s = '';
+  idx += 1;
+  while (idx > 0) {
+    const rem = (idx - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    idx = Math.floor((idx - 1) / 26);
+  }
+  return s;
+}
+async function readSheetHeadersAndCounts(sheetId, tab) {
+  const sheets = await getSheetsClientOrNull();
+  if (!sheets) throw new Error('Sheets not configured');
+  const headerRes = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: `${tab}!1:1` });
+  const headers = (headerRes.data.values?.[0] || []).map(String).map(s => s.trim()).filter(Boolean);
+  const countRes = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: `${tab}!A2:Z1000` });
+  const grid = countRes.data.values || [];
+  const counts = headers.map((_, c) => {
+    let filled = 0;
+    for (let r = 0; r < grid.length; r++) {
+      const cell = grid[r]?.[c];
+      if (cell && String(cell).trim().length > 0) filled++;
+    }
+    return filled;
+  });
+  return { headers, counts };
+}
+function parseHeaderToChoice(h) {
+  const m = h.match(/^(.*?)(?:\s*\((\d+)\))?$/);
+  const name = (m?.[1] || h).trim();
+  const max = m?.[2] ? parseInt(m[2], 10) : null;
+  return { name, max };
+}
+function sheetSignupEmbed(guildName) {
+  const titleLabel = state.sheetSignup.label ? ` — ${state.sheetSignup.label}` : '';
+  const e = new EmbedBuilder()
+    .setTitle(`📝 Signup${titleLabel}`)
+    .setColor(0x3498db)
+    .setDescription('Choose an option from the dropdown. You can switch at any time.');
+  if (state.sheetSignup.choices.length === 0) {
+    e.addFields({ name: 'No choices found', value: 'Ensure row 1 in the sheet tab has headers.' });
+  } else {
+    e.addFields(
+      ...state.sheetSignup.choices.map(ch => ({
+        name: `${ch.name}${typeof ch.count === 'number' ? ` (${ch.count}${ch.max ? '/' + ch.max : ''})` : ''}`,
+        value: ch.count > 0 ? ' ' : '(empty)',
+        inline: false
+      }))
+    );
+  }
+  return e;
+}
+function sheetSignupComponents() {
+  if (!state.sheetSignup.active) return [];
+  const options = state.sheetSignup.choices.slice(0, 25).map((ch, idx) => ({
+    label: ch.name,
+    value: String(idx),
+    description: (typeof ch.count === 'number') ? `${ch.count}${ch.max ? '/' + ch.max : ''}` : undefined
+  }));
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(SHEET_SIGNUP.SELECT)
+    .setPlaceholder('Pick an option')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(options);
+  const row1 = new ActionRowBuilder().addComponents(select);
+  const leaveBtn = new ButtonBuilder().setCustomId(SHEET_SIGNUP.LEAVE).setLabel('Leave (clear choice)').setStyle(ButtonStyle.Secondary);
+  const row2 = new ActionRowBuilder().addComponents(leaveBtn);
+  return [row1, row2];
+}
+async function updateSheetSignupMessage(guild) {
+  if (!state.sheetSignup.messageId || !state.sheetSignup.channelId) return;
+  try {
+    const ch = await guild.channels.fetch(state.sheetSignup.channelId);
+    const msg = await ch.messages.fetch(state.sheetSignup.messageId);
+    await msg.edit({ embeds: [sheetSignupEmbed(guild.name)], components: sheetSignupComponents() });
+  } catch {}
+}
+async function removeUserFromAllSheetColumns(sheetId, tab, displayName) {
+  const sheets = await getSheetsClientOrNull();
+  if (!sheets) return;
+  const range = `${tab}!A2:Z1000`;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
+  const grid = res.data.values || [];
+  let changed = false;
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < Math.max(26, (grid[r]?.length || 0)); c++) {
+      const cell = grid[r]?.[c];
+      if (cell && String(cell).trim() === displayName) {
+        if (!grid[r]) grid[r] = [];
+        grid[r][c] = '';
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: { values: grid }
+    });
+  }
+}
+async function appendUserToSheetColumnIfSpace(sheetId, tab, colIdx, displayName, maxOrNull) {
+  const sheets = await getSheetsClientOrNull();
+  if (!sheets) throw new Error('Sheets not configured');
+  const colLetter = colIndexToLetter(colIdx);
+  const colRange = `${tab}!${colLetter}2:${colLetter}1000`;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: colRange });
+  const col = (res.data.values || []).map(row => row[0]);
+  const filtered = col.filter(v => v && String(v).trim().length > 0);
+  if (typeof maxOrNull === 'number' && filtered.length >= maxOrNull) {
+    return { ok: false, reason: 'full', count: filtered.length };
+  }
+  if (filtered.includes(displayName)) return { ok: true, count: filtered.length };
+  filtered.push(displayName);
+  const out = filtered.map(v => [v]);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: colRange,
+    valueInputOption: 'RAW',
+    requestBody: { values: out }
+  });
+  return { ok: true, count: filtered.length };
 }
 function voteResultsEmbed() {
   const sorted = tallyVotes();
@@ -340,7 +504,25 @@ client.once(Events.ClientReady, async () => {
       { type: 3, name: 'sheettab', description: 'Sheet tab name (e.g., Sheet1)', required: false }
     ] },
     { name: 'gamesignup_stop', description: 'Admin: stop the game signup session', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
-    { name: 'gamesignup_export', description: 'Admin: export the current game signup overview (ephemeral)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild }
+    { name: 'gamesignup_export', description: 'Admin: export the current game signup overview (ephemeral)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
+    // Sheet signup commands
+    { name: 'signup-start', description: 'Admin: start a Sheet-driven signup (tab name in your sheet)', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
+      { type: 3, name: 'tab', description: 'Tab (sheet) name, e.g., long-format', required: true },
+      { type: 3, name: 'label', description: 'Optional label shown in title', required: false },
+      { type: 3, name: 'sheetid', description: 'Override Google Sheet ID (optional)', required: false }
+    ] },
+    { name: 'signup-stop', description: 'Admin: stop the current Sheet-driven signup', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
+    // Long/Short single-choice polls
+    { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
+      { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
+      { type: 1, name: 'start', description: 'Start the poll in this channel' },
+      { type: 1, name: 'stop', description: 'Stop the poll and freeze results' }
+    ] },
+    { name: 'short', description: 'Admin: manage Short-format poll', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
+      { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
+      { type: 1, name: 'start', description: 'Start the poll in this channel' },
+      { type: 1, name: 'stop', description: 'Stop the poll and freeze results' }
+    ] }
   ]);
 });
 
@@ -366,6 +548,114 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
+      // Helper accessors for long/short polls
+      const getPollByName = (name) => name === 'long' ? state.longPoll : state.shortPoll;
+      const setPollByName = (name, poll) => { if (name === 'long') state.longPoll = poll; else state.shortPoll = poll; };
+      const POLL = { LONG: 'long', SHORT: 'short' };
+      const makeChoiceId = (which, idx) => `${which}_select_${idx}`;
+      const POLL_MODAL = { long: 'long_edit_modal', short: 'short_edit_modal' };
+      const POLL_INPUT = { long: 'long_choices_input', short: 'short_choices_input' };
+      const maxButtons = 25;
+      function pollEmbed(which, guildName) {
+        const poll = getPollByName(which);
+        const e = new EmbedBuilder()
+          .setTitle(which === POLL.LONG ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
+          .setColor(which === POLL.LONG ? 0x9b59b6 : 0xf1c40f)
+          .setDescription(poll.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
+        if (!poll.choices.length) {
+          e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' });
+          return e;
+        }
+        // Build per-choice user lists
+        for (let idx = 0; idx < poll.choices.length; idx++) {
+          const name = poll.choices[idx];
+          const usersIn = Object.entries(poll.selections).filter(([, choice]) => choice === idx).map(([uid]) => `<@${uid}>`);
+          let value = '(empty)';
+          if (usersIn.length > 0) {
+            const shown = usersIn.slice(0, 20);
+            value = shown.join(', ');
+            if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
+          }
+          e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
+        }
+        return e;
+      }
+      function pollComponents(which, disabled = false) {
+        const poll = getPollByName(which);
+        if (!poll.active) disabled = true;
+        // up to 5 buttons per row, 25 max
+        const rows = [];
+        poll.choices.slice(0, maxButtons).forEach((label, idx) => {
+          const btn = new ButtonBuilder()
+            .setCustomId(makeChoiceId(which, idx))
+            .setStyle(which === POLL.LONG ? ButtonStyle.Primary : ButtonStyle.Success)
+            .setLabel(label)
+            .setDisabled(disabled);
+          if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) {
+            rows.push(new ActionRowBuilder().addComponents(btn));
+          } else {
+            rows[rows.length - 1].addComponents(btn);
+          }
+        });
+        return rows;
+      }
+      async function updatePollMessage(guild, which) {
+        const poll = getPollByName(which);
+        if (!poll.messageId || !poll.channelId) return;
+        try {
+          const ch = await guild.channels.fetch(poll.channelId);
+          const msg = await ch.messages.fetch(poll.messageId);
+          await msg.edit({ embeds: [pollEmbed(which, guild.name)], components: pollComponents(which) });
+        } catch {}
+      }
+
+      // Long/Short subcommands
+      if (i.commandName === 'long' || i.commandName === 'short') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        const which = i.commandName; // 'long' | 'short'
+        const sub = i.options.getSubcommand();
+        if (sub === 'edit') {
+          const modal = new ModalBuilder().setCustomId(POLL_MODAL[which]).setTitle(which === POLL.LONG ? 'Edit Long-format choices' : 'Edit Short-format choices');
+          const input = new TextInputBuilder()
+            .setCustomId(POLL_INPUT[which])
+            .setLabel('Enter one choice per line')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setPlaceholder('Game A\nGame B\nGame C');
+          modal.addComponents(new ActionRowBuilder().addComponents(input));
+          return i.showModal(modal);
+        }
+        if (sub === 'start') {
+          const poll = getPollByName(which);
+          if (!poll.choices.length) return i.reply({ content: '⚠️ No choices yet. Use /' + which + ' edit first.', flags: MessageFlags.Ephemeral });
+          // clamp to 25 choices
+          if (poll.choices.length > maxButtons) poll.choices = poll.choices.slice(0, maxButtons);
+          poll.active = true;
+          poll.channelId = i.channel.id;
+          // If previous message exists, delete it to keep one active panel
+          if (poll.messageId) {
+            try {
+              const ch = await i.guild.channels.fetch(poll.channelId);
+              const old = await ch.messages.fetch(poll.messageId);
+              await old.delete();
+            } catch {}
+            poll.messageId = null;
+          }
+          const msg = await i.channel.send({ embeds: [pollEmbed(which, i.guild.name)], components: pollComponents(which) });
+          poll.messageId = msg.id;
+          setPollByName(which, poll);
+          saveState();
+          return i.reply({ content: `🟢 ${which === POLL.LONG ? 'Long' : 'Short'} poll started.`, flags: MessageFlags.Ephemeral });
+        }
+        if (sub === 'stop') {
+          const poll = getPollByName(which);
+          poll.active = false;
+          setPollByName(which, poll);
+          saveState();
+          await updatePollMessage(i.guild, which);
+          return i.reply({ content: `🛑 ${which === POLL.LONG ? 'Long' : 'Short'} poll stopped.`, flags: MessageFlags.Ephemeral });
+        }
+      }
       // Game signup: start
       if (i.commandName === 'gamesignup_start') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
@@ -417,6 +707,44 @@ client.on(Events.InteractionCreate, async (i) => {
         if (content.length <= 1900) return i.reply({ content, flags: MessageFlags.Ephemeral });
         const buf = Buffer.from(text, 'utf8');
         return i.reply({ content: '📄 Overview attached.', files: [{ attachment: buf, name: `game-signup-${Date.now()}.txt` }], flags: MessageFlags.Ephemeral });
+      }
+
+      // Sheet signup: start
+      if (i.commandName === 'signup-start') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        const tab = i.options.getString('tab').trim();
+        const label = i.options.getString('label');
+        const overrideSheet = i.options.getString('sheetid');
+        const sheetId = (overrideSheet && overrideSheet.trim()) || process.env.SIGNUP_SHEET_ID || state.gameSignup?.sheet?.id || state.sheetSignup.sheetId;
+        if (!sheetId) return i.reply({ content: '❌ No Sheet ID. Pass sheetid or set SIGNUP_SHEET_ID env.', flags: MessageFlags.Ephemeral });
+        try {
+          const { headers, counts } = await readSheetHeadersAndCounts(sheetId, tab);
+          const choices = headers.map((h, idx) => ({ ...parseHeaderToChoice(h), count: counts[idx] }));
+          state.sheetSignup.active = true;
+          state.sheetSignup.label = label?.trim() || null;
+          state.sheetSignup.sheetId = sheetId;
+          state.sheetSignup.tab = tab;
+          state.sheetSignup.choices = choices;
+          state.sheetSignup.channelId = i.channel.id;
+          state.sheetSignup.messageId = null;
+          saveState();
+          const msg = await i.channel.send({ embeds: [sheetSignupEmbed(i.guild.name)], components: sheetSignupComponents() });
+          state.sheetSignup.messageId = msg.id;
+          saveState();
+          return i.reply({ content: `🟢 Signup started for tab "${tab}"${state.sheetSignup.label ? ` — ${state.sheetSignup.label}` : ''}.`, flags: MessageFlags.Ephemeral });
+        } catch (e) {
+          console.error('signup-start error:', e.message);
+          return i.reply({ content: '❌ Could not read headers from Sheet. Check ID/tab and credentials.', flags: MessageFlags.Ephemeral });
+        }
+      }
+
+      // Sheet signup: stop
+      if (i.commandName === 'signup-stop') {
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        state.sheetSignup.active = false;
+        saveState();
+        await updateSheetSignupMessage(i.guild);
+        return i.reply({ content: '🛑 Signup stopped. Controls disabled.', flags: MessageFlags.Ephemeral });
       }
       // Voting session controls
       if (i.commandName === 'votestart') {
@@ -670,6 +998,56 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Button handlers
     if (i.isButton()) {
+      // Long/Short selection buttons
+      if (i.customId.startsWith('long_select_') || i.customId.startsWith('short_select_')) {
+        const which = i.customId.startsWith('long_') ? 'long' : 'short';
+        const poll = which === 'long' ? state.longPoll : state.shortPoll;
+        if (!poll.active) return i.reply({ content: '⚠️ Poll is not active.', flags: MessageFlags.Ephemeral });
+        const idx = parseInt(i.customId.split('_').pop(), 10);
+        if (Number.isNaN(idx) || !poll.choices[idx]) return i.reply({ content: '❌ Invalid choice.', flags: MessageFlags.Ephemeral });
+        // Single-choice: move user to this choice
+        poll.selections[i.user.id] = idx;
+        if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
+        saveState();
+        // Update panel with latest selections
+        try {
+          const embed = (function(){
+            const p = poll;
+            const e = new EmbedBuilder()
+              .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
+              .setColor(which === 'long' ? 0x9b59b6 : 0xf1c40f)
+              .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
+            if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
+            for (let j = 0; j < p.choices.length; j++) {
+              const name = p.choices[j];
+              const usersIn = Object.entries(p.selections).filter(([, c]) => c === j).map(([uid]) => `<@${uid}>`);
+              let value = '(empty)';
+              if (usersIn.length > 0) {
+                const shown = usersIn.slice(0, 20);
+                value = shown.join(', ');
+                if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
+              }
+              e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
+            }
+            return e;
+          })();
+          // rebuild components
+          const rows = [];
+          poll.choices.slice(0, 25).forEach((label, k) => {
+            const btn = new ButtonBuilder()
+              .setCustomId(`${which}_select_${k}`)
+              .setStyle(which === 'long' ? ButtonStyle.Primary : ButtonStyle.Success)
+              .setLabel(label)
+              .setDisabled(!poll.active);
+            if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
+            else rows[rows.length - 1].addComponents(btn);
+          });
+          const ch = await i.guild.channels.fetch(poll.channelId);
+          const msg = await ch.messages.fetch(poll.messageId);
+          await msg.edit({ embeds: [embed], components: rows });
+        } catch {}
+        return i.reply({ content: `✅ Selected: ${poll.choices[idx]}`, flags: MessageFlags.Ephemeral });
+      }
       // Game signup leave
       if (i.customId === GAME_SIGNUP.LEAVE) {
         if (!state.gameSignup.active) return i.reply({ content: '⚠️ No active game signup.', flags: MessageFlags.Ephemeral });
@@ -679,6 +1057,24 @@ client.on(Events.InteractionCreate, async (i) => {
         await syncGameSignupToSheet(i.guild);
         return i.reply({ content: '✅ You left your game.', flags: MessageFlags.Ephemeral });
       }
+      // Sheet signup leave
+      if (i.customId === SHEET_SIGNUP.LEAVE) {
+        if (!state.sheetSignup.active) return i.reply({ content: '⚠️ No active signup.', flags: MessageFlags.Ephemeral });
+        try {
+          const member = await i.guild.members.fetch(i.user.id);
+          const displayName = member.displayName || member.user.username;
+          await removeUserFromAllSheetColumns(state.sheetSignup.sheetId, state.sheetSignup.tab, displayName);
+          const { headers, counts } = await readSheetHeadersAndCounts(state.sheetSignup.sheetId, state.sheetSignup.tab);
+          state.sheetSignup.choices = headers.map((h, idx) => ({ ...parseHeaderToChoice(h), count: counts[idx] }));
+          saveState();
+          await updateSheetSignupMessage(i.guild);
+          return i.reply({ content: '✅ Your choice was cleared.', flags: MessageFlags.Ephemeral });
+        } catch (e) {
+          console.error('sheet leave error:', e.message);
+          return i.reply({ content: '❌ Could not update the sheet.', flags: MessageFlags.Ephemeral });
+        }
+      }
+
       const roles = await ensureRoles(i.guild);
       const member = await i.guild.members.fetch(i.user.id);
 
@@ -779,13 +1175,59 @@ client.on(Events.InteractionCreate, async (i) => {
       }
     }
 
-    // unvote menu
+  // unvote menu
     if (i.isStringSelectMenu() && i.customId === 'unvote_menu') {
       const game = i.values[0];
       state.votes[i.user.id] = state.votes[i.user.id].filter(g => g !== game);
       saveState();
       await updateVoteMessage(i.guild);
       await i.update({ content: `🗑️ Removed vote for ${game}`, components: [] });
+    }
+    // Long/Short edit modals
+    if (i.isModalSubmit() && (i.customId === 'long_edit_modal' || i.customId === 'short_edit_modal')) {
+      if (!i.memberPermissions?.has?.(PermissionsBitField.Flags.ManageGuild)) {
+        return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+      }
+      const which = i.customId.startsWith('long') ? 'long' : 'short';
+      const inputId = which === 'long' ? 'long_choices_input' : 'short_choices_input';
+      const raw = i.fields.getTextInputValue(inputId) || '';
+      const choices = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      const poll = which === 'long' ? state.longPoll : state.shortPoll;
+      poll.choices = choices.slice(0, 25);
+      poll.selections = {}; // reset selections on edit
+      if ((which === 'long')) state.longPoll = poll; else state.shortPoll = poll;
+      saveState();
+      // If active and message exists, refresh panel
+      if (poll.active && poll.messageId && poll.channelId) {
+        try {
+          const embed = (function(){
+            const p = poll;
+            const e = new EmbedBuilder()
+              .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
+              .setColor(which === 'long' ? 0x9b59b6 : 0xf1c40f)
+              .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
+            if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
+            for (let j = 0; j < p.choices.length; j++) {
+              e.addFields({ name: `${p.choices[j]} (0)`, value: '(empty)', inline: false });
+            }
+            return e;
+          })();
+          const rows = [];
+          poll.choices.slice(0, 25).forEach((label, k) => {
+            const btn = new ButtonBuilder()
+              .setCustomId(`${which}_select_${k}`)
+              .setStyle(which === 'long' ? ButtonStyle.Primary : ButtonStyle.Success)
+              .setLabel(label)
+              .setDisabled(!poll.active);
+            if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
+            else rows[rows.length - 1].addComponents(btn);
+          });
+          const ch = await i.guild.channels.fetch(poll.channelId);
+          const msg = await ch.messages.fetch(poll.messageId);
+          await msg.edit({ embeds: [embed], components: rows });
+        } catch {}
+      }
+      return i.reply({ content: `✅ Updated ${which} choices (${choices.length} items).`, flags: MessageFlags.Ephemeral });
     }
     // Game signup selection
     if (i.isStringSelectMenu() && i.customId === GAME_SIGNUP.SELECT) {
@@ -801,6 +1243,30 @@ client.on(Events.InteractionCreate, async (i) => {
       await updateGameSignupMessage(i.guild);
       await syncGameSignupToSheet(i.guild);
       return i.reply({ content: `✅ Joined ${game.name}.`, flags: MessageFlags.Ephemeral });
+    }
+    // Sheet signup selection
+    if (i.isStringSelectMenu() && i.customId === SHEET_SIGNUP.SELECT) {
+      if (!state.sheetSignup.active) return i.reply({ content: '⚠️ No active signup.', flags: MessageFlags.Ephemeral });
+      const idx = parseInt(i.values[0], 10);
+      const choice = state.sheetSignup.choices[idx];
+      if (!choice) return i.reply({ content: '❌ Invalid choice.', flags: MessageFlags.Ephemeral });
+      try {
+        const member = await i.guild.members.fetch(i.user.id);
+        const displayName = member.displayName || member.user.username;
+        await removeUserFromAllSheetColumns(state.sheetSignup.sheetId, state.sheetSignup.tab, displayName);
+        const result = await appendUserToSheetColumnIfSpace(state.sheetSignup.sheetId, state.sheetSignup.tab, idx, displayName, choice.max ?? null);
+        if (!result.ok && result.reason === 'full') {
+          return i.reply({ content: '⛔ That option is full.', flags: MessageFlags.Ephemeral });
+        }
+        const { headers, counts } = await readSheetHeadersAndCounts(state.sheetSignup.sheetId, state.sheetSignup.tab);
+        state.sheetSignup.choices = headers.map((h, j) => ({ ...parseHeaderToChoice(h), count: counts[j] }));
+        saveState();
+        await updateSheetSignupMessage(i.guild);
+        return i.reply({ content: `✅ Signed up for ${choice.name}.`, flags: MessageFlags.Ephemeral });
+      } catch (e) {
+        console.error('sheet select error:', e.message);
+        return i.reply({ content: '❌ Could not update the sheet.', flags: MessageFlags.Ephemeral });
+      }
     }
   } catch (err) {
     console.error('Interaction error:', err);
