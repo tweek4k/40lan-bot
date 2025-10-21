@@ -513,13 +513,13 @@ client.once(Events.ClientReady, async () => {
     ] },
     { name: 'signup-stop', description: 'Admin: stop the current Sheet-driven signup', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild },
     // Long/Short single-choice polls
-    { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
+  { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
       { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
       { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
       { type: 1, name: 'unpause', description: 'Unpause the poll (enable buttons)' }
     ] },
-    { name: 'short', description: 'Admin: manage Short-format poll', defaultMemberPermissions: PermissionsBitField.Flags.ManageGuild, options: [
+  { name: 'short', description: 'Admin: manage Short-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
       { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
       { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
@@ -622,7 +622,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
       // Long/Short subcommands
       if (i.commandName === 'long' || i.commandName === 'short') {
-        if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+        if (!i.memberPermissions.has(PermissionsBitField.Flags.Administrator)) return i.reply({ content: '❌ Need Admin.', flags: MessageFlags.Ephemeral });
         const which = i.commandName; // 'long' | 'short'
         const sub = i.options.getSubcommand();
         if (sub === 'edit') {
@@ -1280,8 +1280,8 @@ client.on(Events.InteractionCreate, async (i) => {
     }
     // Long/Short edit modals
     if (i.isModalSubmit() && (i.customId === 'long_edit_modal' || i.customId === 'short_edit_modal')) {
-      if (!i.memberPermissions?.has?.(PermissionsBitField.Flags.ManageGuild)) {
-        return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
+      if (!i.memberPermissions?.has?.(PermissionsBitField.Flags.Administrator)) {
+        return i.reply({ content: '❌ Need Admin.', flags: MessageFlags.Ephemeral });
       }
       const which = i.customId.startsWith('long') ? 'long' : 'short';
       const inputId = which === 'long' ? 'long_choices_input' : 'short_choices_input';
