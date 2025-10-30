@@ -47,8 +47,8 @@ Deployment (Docker on Raspberry Pi + Home Assistant)
 
 2) On your Raspberry Pi (with Docker + Compose plugin installed):
 	- Make a folder, copy the repo contents (or git clone)
-	- Ensure lan-data.json exists: echo {} > lan-data.json
 	- Run: docker compose up -d
+	- Data is stored in a managed volume (lan-bot-data). No bind mount required.
 
 3) Auto-update:
 	- A GitHub Actions workflow builds and pushes multi-arch images to GHCR on push to main.
@@ -61,8 +61,18 @@ Deployment (Docker on Raspberry Pi + Home Assistant)
 	- docker compose logs -f lan-bot
 
 6) Home Assistant Core:
-	- If running on the same host, Docker services run alongside HA Core without conflicts.
-	- For supervised/add-on installs, consider using Portainer or the HA Docker integration to manage containers.
+	 - If running on the same host, Docker services run alongside HA Core without conflicts.
+	 - If you must bind to a writable path, use /config (HA OS) and set in compose:
+		 volumes:
+			 - /config/lan-bot:/app/data
+		 environment:
+			 - DATA_FILE=/app/data/lan-data.json
+	 - For supervised/add-on installs, consider using Portainer or the HA Docker integration to manage containers.
+
+7) .env formatting tip for Google Sheets (optional feature):
+	 - GOOGLE_SHEETS_PRIVATE_KEY should be just the PEM string (with \n), for example:
+		 GOOGLE_SHEETS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+	 - Do NOT prefix the value with the variable name again.
 
 npm -v
 
