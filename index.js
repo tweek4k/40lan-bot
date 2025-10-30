@@ -47,6 +47,9 @@ const ROLES = {
   WAIT: 'Waitlist'
 };
 
+// Feedback mode for poll button clicks: 'ephemeral' (default) or 'none'
+const FEEDBACK_MODE = process.env.POLL_FEEDBACK || 'ephemeral';
+
 // ----------------- load games + state -----------------
 const games = JSON.parse(fs.readFileSync('./games.json', 'utf8'));
 const DATA_FILE = process.env.DATA_FILE || './lan-data.json';
@@ -1006,12 +1009,12 @@ client.on(Events.InteractionCreate, async (i) => {
         if (!poll.active) return i.reply({ content: '⚠️ Poll is not active.', flags: MessageFlags.Ephemeral });
         const idx = parseInt(i.customId.split('_').pop(), 10);
         if (Number.isNaN(idx) || !poll.choices[idx]) return i.reply({ content: '❌ Invalid choice.', flags: MessageFlags.Ephemeral });
+        // Ack quickly to prevent timeouts
+        if (FEEDBACK_MODE === 'none') await i.deferUpdate(); else await i.deferReply({ ephemeral: true });
         // Single-choice: move user to this choice
         poll.selections[i.user.id] = idx;
         if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
         saveState();
-        // Acknowledge quickly to avoid timeouts
-        await i.deferReply({ ephemeral: true });
         // Update panel with latest selections (edit the source message directly)
         try {
           const buildEmbed = () => {
@@ -1056,8 +1059,8 @@ client.on(Events.InteractionCreate, async (i) => {
           }
           await i.message.edit({ embeds: [buildEmbed()], components: rows });
         } catch {}
-        await i.editReply({ content: `✅ Selected: ${poll.choices[idx]}` });
-        return;
+        if (FEEDBACK_MODE !== 'none') await i.editReply({ content: `✅ Selected: ${poll.choices[idx]}` });
+        return; 
       }
       // Long/Short clear selection
       if (i.customId === 'long_clear' || i.customId === 'short_clear') {
@@ -1067,10 +1070,10 @@ client.on(Events.InteractionCreate, async (i) => {
         if (poll.selections[i.user.id] === undefined) {
           return i.reply({ content: 'ℹ️ You don\'t have a selection to clear.', flags: MessageFlags.Ephemeral });
         }
+        if (FEEDBACK_MODE === 'none') await i.deferUpdate(); else await i.deferReply({ ephemeral: true });
         delete poll.selections[i.user.id];
         if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
         saveState();
-        await i.deferReply({ ephemeral: true });
         try {
           // Rebuild embed and rows
           const buildEmbed = () => {
@@ -1115,7 +1118,7 @@ client.on(Events.InteractionCreate, async (i) => {
           }
           await i.message.edit({ embeds: [buildEmbed()], components: rows });
         } catch {}
-        await i.editReply({ content: '🧹 Cleared your selection.' });
+        if (FEEDBACK_MODE !== 'none') await i.editReply({ content: '🧹 Cleared your selection.' });
         return;
       }
       // Game signup leave

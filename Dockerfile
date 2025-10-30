@@ -13,10 +13,13 @@ COPY . .
 # Ensure a default data path inside the container
 ENV DATA_FILE=/app/lan-data.json
 
-# Prepare writable data dir and run as non-root for safety
+# Prepare writable data dir and non-root user; install su-exec for uid drop at runtime
 RUN addgroup -S app && adduser -S app -G app \
   && mkdir -p /app/data \
-  && chown -R app:app /app
-USER app
+  && chown -R app:app /app \
+  && apk add --no-cache su-exec
 
-CMD ["npm", "start"]
+# Use an entrypoint that fixes ownership on mounted volumes then drops privileges
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
