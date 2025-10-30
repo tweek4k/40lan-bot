@@ -564,14 +564,20 @@ client.on(Events.InteractionCreate, async (i) => {
             rows[rows.length - 1].addComponents(btn);
           }
         });
-        // Add a clear selection button on its own row
+        // Add a clear selection button while respecting the 5-row cap
         if (poll.choices.length > 0) {
           const clearBtn = new ButtonBuilder()
             .setCustomId(`${which}_clear`)
             .setStyle(ButtonStyle.Secondary)
             .setLabel('Clear my selection')
             .setDisabled(disabled);
-          rows.push(new ActionRowBuilder().addComponents(clearBtn));
+          if (rows.length === 0) {
+            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+          } else if (rows[rows.length - 1].components.length < 5) {
+            rows[rows.length - 1].addComponents(clearBtn);
+          } else if (rows.length < 5) {
+            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+          } // else: no space; omit clear button to avoid exceeding 5 rows
         }
         return rows;
       }
@@ -1004,9 +1010,11 @@ client.on(Events.InteractionCreate, async (i) => {
         poll.selections[i.user.id] = idx;
         if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
         saveState();
-        // Update panel with latest selections
+        // Acknowledge quickly to avoid timeouts
+        await i.deferReply({ ephemeral: true });
+        // Update panel with latest selections (edit the source message directly)
         try {
-          const embed = (function(){
+          const buildEmbed = () => {
             const p = poll;
             const e = new EmbedBuilder()
               .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
@@ -1025,8 +1033,7 @@ client.on(Events.InteractionCreate, async (i) => {
               e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
             }
             return e;
-          })();
-          // rebuild components
+          };
           const rows = [];
           poll.choices.slice(0, 25).forEach((label, k) => {
             const btn = new ButtonBuilder()
@@ -1043,13 +1050,14 @@ client.on(Events.InteractionCreate, async (i) => {
               .setStyle(ButtonStyle.Secondary)
               .setLabel('Clear my selection')
               .setDisabled(!poll.active);
-            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+            if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
+            else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
+            else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
           }
-          const ch = await i.guild.channels.fetch(poll.channelId);
-          const msg = await ch.messages.fetch(poll.messageId);
-          await msg.edit({ embeds: [embed], components: rows });
+          await i.message.edit({ embeds: [buildEmbed()], components: rows });
         } catch {}
-        return i.reply({ content: `✅ Selected: ${poll.choices[idx]}`, flags: MessageFlags.Ephemeral });
+        await i.editReply({ content: `✅ Selected: ${poll.choices[idx]}` });
+        return;
       }
       // Long/Short clear selection
       if (i.customId === 'long_clear' || i.customId === 'short_clear') {
@@ -1062,9 +1070,10 @@ client.on(Events.InteractionCreate, async (i) => {
         delete poll.selections[i.user.id];
         if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
         saveState();
+        await i.deferReply({ ephemeral: true });
         try {
           // Rebuild embed and rows
-          const embed = (function(){
+          const buildEmbed = () => {
             const p = poll;
             const e = new EmbedBuilder()
               .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
@@ -1083,7 +1092,7 @@ client.on(Events.InteractionCreate, async (i) => {
               e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
             }
             return e;
-          })();
+          };
           const rows = [];
           poll.choices.slice(0, 25).forEach((label, k) => {
             const btn = new ButtonBuilder()
@@ -1100,13 +1109,14 @@ client.on(Events.InteractionCreate, async (i) => {
               .setStyle(ButtonStyle.Secondary)
               .setLabel('Clear my selection')
               .setDisabled(!poll.active);
-            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+            if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
+            else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
+            else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
           }
-          const ch = await i.guild.channels.fetch(poll.channelId);
-          const msg = await ch.messages.fetch(poll.messageId);
-          await msg.edit({ embeds: [embed], components: rows });
+          await i.message.edit({ embeds: [buildEmbed()], components: rows });
         } catch {}
-        return i.reply({ content: '🧹 Cleared your selection.', flags: MessageFlags.Ephemeral });
+        await i.editReply({ content: '🧹 Cleared your selection.' });
+        return;
       }
       // Game signup leave
       if (i.customId === GAME_SIGNUP.LEAVE) {
@@ -1307,7 +1317,9 @@ client.on(Events.InteractionCreate, async (i) => {
               .setStyle(ButtonStyle.Secondary)
               .setLabel('Clear my selection')
               .setDisabled(!poll.active);
-            rows.push(new ActionRowBuilder().addComponents(clearBtn));
+            if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
+            else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
+            else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
           }
           const ch = await i.guild.channels.fetch(poll.channelId);
           const msg = await ch.messages.fetch(poll.messageId);
