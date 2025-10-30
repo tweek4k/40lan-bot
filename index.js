@@ -475,6 +475,9 @@ client.once(Events.ClientReady, async () => {
 
   await guild.commands.set([
     // Only keep the new poll commands
+    { name: 'suggestgame', description: 'Suggest a new game title', options: [
+      { type: 3, name: 'title', description: 'Game title', required: true }
+    ] },
     { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
       { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
@@ -974,7 +977,7 @@ client.on(Events.InteractionCreate, async (i) => {
         if (games.find(g => g.toLowerCase() === title.toLowerCase())) return i.reply({ content: `⚠️ ${title} already exists.`, flags: MessageFlags.Ephemeral });
         games.push(title);
         fs.writeFileSync('./games.json', JSON.stringify(games, null, 2));
-        return i.reply({ content: `📥 Added ${title}.` });
+        return i.reply({ content: `Added ${title}.` });
       }
       if (i.commandName === 'setmaxvotes') {
         if (!i.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)) return i.reply({ content: '❌ Need Manage Server.', flags: MessageFlags.Ephemeral });
