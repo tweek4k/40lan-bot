@@ -13,8 +13,9 @@ COPY . .
 # Ensure a default data path inside the container
 ENV DATA_FILE=/app/lan-data.json
 
-# Run as non-root for safety
+# Prepare writable data dir and run as non-root for safety
 RUN addgroup -S app && adduser -S app -G app \
+  && mkdir -p /app/data \
   && chown -R app:app /app
 USER app
 
