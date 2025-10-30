@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  lan-bot:
+    container_name: lan-bot
+    image: ghcr.io/tweek4k/40lan-bot:latest
+    # If you want to build locally instead, comment the image line and uncomment the build lines:
+    # build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Ensure the bot writes its state to a mounted file
+      - DATA_FILE=/app/lan-data.json
+      - TZ=${TZ:-Etc/UTC}
+    volumes:
+      - ./lan-data.json:/app/lan-data.json
+    # Optional: set user to avoid root-owned files on the host; set to your host UID:GID
+    # user: "1000:1000"
+
+  # Auto-update when a new image is pushed to GHCR
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --interval 300 lan-bot
