@@ -147,6 +147,7 @@ Admin slash commands
 /statuslist → Show LAN/MAYBE/REMOTE counts + waitlist order.
 
 /export → Export all signups to CSV.
+/long start [maxselect] → Start the long-format poll. Optional maxselect lets each user pick multiple choices (defaults to 1).
 
 📂 Data
 

@@ -50,6 +50,12 @@ const ROLES = {
 // Feedback mode for poll button clicks: 'ephemeral' (default) or 'none'
 const FEEDBACK_MODE = process.env.POLL_FEEDBACK || 'ephemeral';
 
+const POLL = { LONG: 'long', SHORT: 'short' };
+const POLL_MODAL = { [POLL.LONG]: 'long_edit_modal', [POLL.SHORT]: 'short_edit_modal' };
+const POLL_INPUT = { [POLL.LONG]: 'long_choices_input', [POLL.SHORT]: 'short_choices_input' };
+const MAX_POLL_BUTTONS = 25;
+const makeChoiceId = (which, idx) => `${which}_select_${idx}`;
+
 // ----------------- load games + state -----------------
 const games = JSON.parse(fs.readFileSync('./games.json', 'utf8'));
 const DATA_FILE = process.env.DATA_FILE || './lan-data.json';
@@ -85,11 +91,115 @@ if (!state.sheetSignup) {
   };
 }
 // New: single-choice polls for long/short formats
-if (!state.longPoll) {
-  state.longPoll = { active: false, choices: [], selections: {}, messageId: null, channelId: null };
+state.longPoll = ensurePollState(state.longPoll);
+state.shortPoll = ensurePollState(state.shortPoll);
+
+function ensurePollState(existing = {}) {
+  const poll = {
+    active: Boolean(existing?.active),
+    choices: Array.isArray(existing?.choices) ? existing.choices : [],
+    selections: (existing?.selections && typeof existing.selections === 'object') ? existing.selections : {},
+    maxSelections: Math.max(1, Number(existing?.maxSelections) || 1),
+    messageId: existing?.messageId || null,
+    channelId: existing?.channelId || null
+  };
+  sanitizePollSelections(poll);
+  return poll;
 }
-if (!state.shortPoll) {
-  state.shortPoll = { active: false, choices: [], selections: {}, messageId: null, channelId: null };
+
+function normalizeSelectionValue(value) {
+  if (Array.isArray(value)) return value.filter((idx) => Number.isInteger(idx));
+  if (Number.isInteger(value)) return [value];
+  return [];
+}
+
+function sanitizePollSelections(poll) {
+  if (!poll || !poll.selections) {
+    if (poll) poll.selections = {};
+    return;
+  }
+  for (const [userId, rawValue] of Object.entries(poll.selections)) {
+    const normalized = normalizeSelectionValue(rawValue);
+    if (normalized.length) poll.selections[userId] = normalized;
+    else delete poll.selections[userId];
+  }
+}
+
+const getPollByName = (name) => name === POLL.LONG ? state.longPoll : state.shortPoll;
+const setPollByName = (name, poll) => {
+  if (name === POLL.LONG) state.longPoll = poll; else state.shortPoll = poll;
+};
+
+function pollDescription(poll) {
+  if (!poll.active) return 'Poll is closed.';
+  if (poll.maxSelections > 1) return `Pick up to ${poll.maxSelections} choices. Click again to remove.`;
+  return 'Click a button to choose. You can change your vote anytime.';
+}
+
+function renderPollEmbed(poll, which, guildName) {
+  sanitizePollSelections(poll);
+  const isLong = which === POLL.LONG;
+  const embed = new EmbedBuilder()
+    .setTitle(isLong ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
+    .setColor(isLong ? 0x9b59b6 : 0xf1c40f)
+    .setDescription(pollDescription(poll));
+  if (!poll.choices.length) {
+    embed.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' });
+    return embed;
+  }
+  for (let idx = 0; idx < poll.choices.length; idx++) {
+    const name = poll.choices[idx];
+    const usersIn = Object.entries(poll.selections)
+      .filter(([, stored]) => normalizeSelectionValue(stored).includes(idx))
+      .map(([uid]) => `<@${uid}>`);
+    let value = '(empty)';
+    if (usersIn.length > 0) {
+      const shown = usersIn.slice(0, 20);
+      value = shown.join(', ');
+      if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
+    }
+    embed.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
+  }
+  return embed;
+}
+
+function renderPollComponents(poll, which, disabled = false) {
+  const rows = [];
+  const buttonsDisabled = disabled || !poll.active;
+  const isLong = which === POLL.LONG;
+  poll.choices.slice(0, MAX_POLL_BUTTONS).forEach((label, idx) => {
+    const btn = new ButtonBuilder()
+      .setCustomId(makeChoiceId(which, idx))
+      .setStyle(isLong ? ButtonStyle.Primary : ButtonStyle.Success)
+      .setLabel(label)
+      .setDisabled(buttonsDisabled);
+    if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
+    else rows[rows.length - 1].addComponents(btn);
+  });
+  if (poll.choices.length > 0) {
+    const clearBtn = new ButtonBuilder()
+      .setCustomId(`${which}_clear`)
+      .setStyle(ButtonStyle.Secondary)
+      .setLabel(poll.maxSelections > 1 ? 'Clear my selections' : 'Clear my selection')
+      .setDisabled(buttonsDisabled);
+    if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
+    else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
+    else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
+  }
+  return rows;
+}
+
+const pollEmbed = (which, guildName) => renderPollEmbed(getPollByName(which), which, guildName);
+const pollComponents = (which, disabled = false) => renderPollComponents(getPollByName(which), which, disabled);
+
+async function updatePollMessage(guild, which) {
+  const poll = getPollByName(which);
+  if (!poll.messageId || !poll.channelId) return;
+  try {
+    const ch = await guild.channels.fetch(poll.channelId);
+    const msg = await ch.messages.fetch(poll.messageId);
+    await msg.edit({ embeds: [renderPollEmbed(poll, which, guild.name)], components: renderPollComponents(poll, which) });
+  } catch {}
 }
 
 function loadState() {
@@ -483,7 +593,9 @@ client.once(Events.ClientReady, async () => {
     ] },
     { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
-      { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)' },
+      { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)', options: [
+        { type: 4, name: 'maxselect', description: 'How many choices each user can pick (default 1)', required: false, min_value: 1, max_value: 25 }
+      ] },
       { type: 1, name: 'pause', description: 'Pause the poll (disable buttons, keep results visible)' },
       { type: 1, name: 'unpause', description: 'Unpause the poll (enable buttons)' }
     ] },
@@ -518,81 +630,6 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
-      // Helper accessors for long/short polls
-      const getPollByName = (name) => name === 'long' ? state.longPoll : state.shortPoll;
-      const setPollByName = (name, poll) => { if (name === 'long') state.longPoll = poll; else state.shortPoll = poll; };
-      const POLL = { LONG: 'long', SHORT: 'short' };
-      const makeChoiceId = (which, idx) => `${which}_select_${idx}`;
-      const POLL_MODAL = { long: 'long_edit_modal', short: 'short_edit_modal' };
-      const POLL_INPUT = { long: 'long_choices_input', short: 'short_choices_input' };
-      const maxButtons = 25;
-      function pollEmbed(which, guildName) {
-        const poll = getPollByName(which);
-        const e = new EmbedBuilder()
-          .setTitle(which === POLL.LONG ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
-          .setColor(which === POLL.LONG ? 0x9b59b6 : 0xf1c40f)
-          .setDescription(poll.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
-        if (!poll.choices.length) {
-          e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' });
-          return e;
-        }
-        // Build per-choice user lists
-        for (let idx = 0; idx < poll.choices.length; idx++) {
-          const name = poll.choices[idx];
-          const usersIn = Object.entries(poll.selections).filter(([, choice]) => choice === idx).map(([uid]) => `<@${uid}>`);
-          let value = '(empty)';
-          if (usersIn.length > 0) {
-            const shown = usersIn.slice(0, 20);
-            value = shown.join(', ');
-            if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
-          }
-          e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
-        }
-        return e;
-      }
-      function pollComponents(which, disabled = false) {
-        const poll = getPollByName(which);
-        if (!poll.active) disabled = true;
-        // up to 5 buttons per row, 25 max
-        const rows = [];
-        poll.choices.slice(0, maxButtons).forEach((label, idx) => {
-          const btn = new ButtonBuilder()
-            .setCustomId(makeChoiceId(which, idx))
-            .setStyle(which === POLL.LONG ? ButtonStyle.Primary : ButtonStyle.Success)
-            .setLabel(label)
-            .setDisabled(disabled);
-          if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) {
-            rows.push(new ActionRowBuilder().addComponents(btn));
-          } else {
-            rows[rows.length - 1].addComponents(btn);
-          }
-        });
-        // Add a clear selection button while respecting the 5-row cap
-        if (poll.choices.length > 0) {
-          const clearBtn = new ButtonBuilder()
-            .setCustomId(`${which}_clear`)
-            .setStyle(ButtonStyle.Secondary)
-            .setLabel('Clear my selection')
-            .setDisabled(disabled);
-          if (rows.length === 0) {
-            rows.push(new ActionRowBuilder().addComponents(clearBtn));
-          } else if (rows[rows.length - 1].components.length < 5) {
-            rows[rows.length - 1].addComponents(clearBtn);
-          } else if (rows.length < 5) {
-            rows.push(new ActionRowBuilder().addComponents(clearBtn));
-          } // else: no space; omit clear button to avoid exceeding 5 rows
-        }
-        return rows;
-      }
-      async function updatePollMessage(guild, which) {
-        const poll = getPollByName(which);
-        if (!poll.messageId || !poll.channelId) return;
-        try {
-          const ch = await guild.channels.fetch(poll.channelId);
-          const msg = await ch.messages.fetch(poll.messageId);
-          await msg.edit({ embeds: [pollEmbed(which, guild.name)], components: pollComponents(which) });
-        } catch {}
-      }
 
       // Long/Short subcommands
       if (i.commandName === 'long' || i.commandName === 'short') {
@@ -614,9 +651,14 @@ client.on(Events.InteractionCreate, async (i) => {
         }
         if (sub === 'start') {
           const poll = getPollByName(which);
+          if (which === POLL.LONG) {
+            const requestedMax = i.options.getInteger('maxselect');
+            const clamped = Math.max(1, Math.min(MAX_POLL_BUTTONS, requestedMax || 1));
+            poll.maxSelections = clamped;
+          }
           if (!poll.choices.length) return i.reply({ content: '⚠️ No choices yet. Use /' + which + ' edit first.', flags: MessageFlags.Ephemeral });
-          // clamp to 25 choices
-          if (poll.choices.length > maxButtons) poll.choices = poll.choices.slice(0, maxButtons);
+          // clamp to Discord's button limit
+          if (poll.choices.length > MAX_POLL_BUTTONS) poll.choices = poll.choices.slice(0, MAX_POLL_BUTTONS);
           // Clear previous selections when starting a new run
           poll.selections = {};
           poll.active = true;
@@ -634,7 +676,8 @@ client.on(Events.InteractionCreate, async (i) => {
           poll.messageId = msg.id;
           setPollByName(which, poll);
           saveState();
-          return i.reply({ content: `🟢 ${which === POLL.LONG ? 'Long' : 'Short'} poll started.`, flags: MessageFlags.Ephemeral });
+          const extra = which === POLL.LONG ? ` Users can pick up to ${poll.maxSelections} choice${poll.maxSelections === 1 ? '' : 's'}.` : '';
+          return i.reply({ content: `🟢 ${which === POLL.LONG ? 'Long' : 'Short'} poll started.` + extra, flags: MessageFlags.Ephemeral });
         }
         if (sub === 'pause') {
           const poll = getPollByName(which);
@@ -1004,121 +1047,63 @@ client.on(Events.InteractionCreate, async (i) => {
     if (i.isButton()) {
       // Long/Short selection buttons
       if (i.customId.startsWith('long_select_') || i.customId.startsWith('short_select_')) {
-        const which = i.customId.startsWith('long_') ? 'long' : 'short';
-        const poll = which === 'long' ? state.longPoll : state.shortPoll;
+        const which = i.customId.startsWith('long_') ? POLL.LONG : POLL.SHORT;
+        const poll = getPollByName(which);
         if (!poll.active) return i.reply({ content: '⚠️ Poll is not active.', flags: MessageFlags.Ephemeral });
         const idx = parseInt(i.customId.split('_').pop(), 10);
         if (Number.isNaN(idx) || !poll.choices[idx]) return i.reply({ content: '❌ Invalid choice.', flags: MessageFlags.Ephemeral });
         // Ack quickly to prevent timeouts
         if (FEEDBACK_MODE === 'none') await i.deferUpdate(); else await i.deferReply({ ephemeral: true });
-        // Single-choice: move user to this choice
-        poll.selections[i.user.id] = idx;
-        if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
+        const maxSelections = Math.max(1, poll.maxSelections || 1);
+        const currentSelections = normalizeSelectionValue(poll.selections[i.user.id]);
+        const alreadySelected = currentSelections.includes(idx);
+        let feedback = '';
+        if (alreadySelected) {
+          const updated = currentSelections.filter((choiceIdx) => choiceIdx !== idx);
+          if (updated.length) poll.selections[i.user.id] = updated;
+          else delete poll.selections[i.user.id];
+          feedback = `➖ Removed: ${poll.choices[idx]}`;
+        } else if (currentSelections.length >= maxSelections) {
+          if (maxSelections === 1) {
+            poll.selections[i.user.id] = [idx];
+            feedback = `✅ Selected: ${poll.choices[idx]}`;
+          } else {
+            if (FEEDBACK_MODE !== 'none') await i.editReply({ content: `⚠️ You already picked ${maxSelections} choice${maxSelections === 1 ? '' : 's'}. Clear one before adding another.` });
+            return;
+          }
+        } else {
+          poll.selections[i.user.id] = [...currentSelections, idx];
+          feedback = `✅ Selected: ${poll.choices[idx]} (${poll.selections[i.user.id].length}/${maxSelections})`;
+        }
+        setPollByName(which, poll);
         saveState();
         // Update panel with latest selections (edit the source message directly)
         try {
-          const buildEmbed = () => {
-            const p = poll;
-            const e = new EmbedBuilder()
-              .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
-              .setColor(which === 'long' ? 0x9b59b6 : 0xf1c40f)
-              .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
-            if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
-            for (let j = 0; j < p.choices.length; j++) {
-              const name = p.choices[j];
-              const usersIn = Object.entries(p.selections).filter(([, c]) => c === j).map(([uid]) => `<@${uid}>`);
-              let value = '(empty)';
-              if (usersIn.length > 0) {
-                const shown = usersIn.slice(0, 20);
-                value = shown.join(', ');
-                if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
-              }
-              e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
-            }
-            return e;
-          };
-          const rows = [];
-          poll.choices.slice(0, 25).forEach((label, k) => {
-            const btn = new ButtonBuilder()
-              .setCustomId(`${which}_select_${k}`)
-              .setStyle(which === 'long' ? ButtonStyle.Primary : ButtonStyle.Success)
-              .setLabel(label)
-              .setDisabled(!poll.active);
-            if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
-            else rows[rows.length - 1].addComponents(btn);
-          });
-          if (poll.choices.length > 0) {
-            const clearBtn = new ButtonBuilder()
-              .setCustomId(`${which}_clear`)
-              .setStyle(ButtonStyle.Secondary)
-              .setLabel('Clear my selection')
-              .setDisabled(!poll.active);
-            if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
-            else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
-            else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
-          }
-          await i.message.edit({ embeds: [buildEmbed()], components: rows });
+          await i.message.edit({ embeds: [renderPollEmbed(poll, which, i.guild.name)], components: renderPollComponents(poll, which) });
         } catch {}
-        if (FEEDBACK_MODE !== 'none') await i.editReply({ content: `✅ Selected: ${poll.choices[idx]}` });
+        if (FEEDBACK_MODE !== 'none') await i.editReply({ content: feedback });
         return; 
       }
       // Long/Short clear selection
       if (i.customId === 'long_clear' || i.customId === 'short_clear') {
-        const which = i.customId.startsWith('long') ? 'long' : 'short';
-        const poll = which === 'long' ? state.longPoll : state.shortPoll;
+        const which = i.customId.startsWith('long') ? POLL.LONG : POLL.SHORT;
+        const poll = getPollByName(which);
         if (!poll.active) return i.reply({ content: '⚠️ Poll is not active.', flags: MessageFlags.Ephemeral });
-        if (poll.selections[i.user.id] === undefined) {
+        const currentSelections = normalizeSelectionValue(poll.selections[i.user.id]);
+        if (!currentSelections.length) {
           return i.reply({ content: 'ℹ️ You don\'t have a selection to clear.', flags: MessageFlags.Ephemeral });
         }
         if (FEEDBACK_MODE === 'none') await i.deferUpdate(); else await i.deferReply({ ephemeral: true });
         delete poll.selections[i.user.id];
-        if (which === 'long') state.longPoll = poll; else state.shortPoll = poll;
+        setPollByName(which, poll);
         saveState();
         try {
-          // Rebuild embed and rows
-          const buildEmbed = () => {
-            const p = poll;
-            const e = new EmbedBuilder()
-              .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
-              .setColor(which === 'long' ? 0x9b59b6 : 0xf1c40f)
-              .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
-            if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
-            for (let j = 0; j < p.choices.length; j++) {
-              const name = p.choices[j];
-              const usersIn = Object.entries(p.selections).filter(([, c]) => c === j).map(([uid]) => `<@${uid}>`);
-              let value = '(empty)';
-              if (usersIn.length > 0) {
-                const shown = usersIn.slice(0, 20);
-                value = shown.join(', ');
-                if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
-              }
-              e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
-            }
-            return e;
-          };
-          const rows = [];
-          poll.choices.slice(0, 25).forEach((label, k) => {
-            const btn = new ButtonBuilder()
-              .setCustomId(`${which}_select_${k}`)
-              .setStyle(which === 'long' ? ButtonStyle.Primary : ButtonStyle.Success)
-              .setLabel(label)
-              .setDisabled(!poll.active);
-            if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
-            else rows[rows.length - 1].addComponents(btn);
-          });
-          if (poll.choices.length > 0) {
-            const clearBtn = new ButtonBuilder()
-              .setCustomId(`${which}_clear`)
-              .setStyle(ButtonStyle.Secondary)
-              .setLabel('Clear my selection')
-              .setDisabled(!poll.active);
-            if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
-            else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
-            else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
-          }
-          await i.message.edit({ embeds: [buildEmbed()], components: rows });
+          await i.message.edit({ embeds: [renderPollEmbed(poll, which, i.guild.name)], components: renderPollComponents(poll, which) });
         } catch {}
-        if (FEEDBACK_MODE !== 'none') await i.editReply({ content: '🧹 Cleared your selection.' });
+        if (FEEDBACK_MODE !== 'none') {
+          const label = poll.maxSelections > 1 ? 'selections' : 'selection';
+          await i.editReply({ content: `🧹 Cleared your ${label}.` });
+        }
         return;
       }
       // Game signup leave
@@ -1270,63 +1255,29 @@ client.on(Events.InteractionCreate, async (i) => {
       // Remap selections to still-present choices (case-insensitive)
       const nameToNewIndex = new Map(newChoices.map((name, idx) => [name.toLowerCase(), idx]));
       const remapped = {};
-      for (const [userId, oldIdx] of Object.entries(poll.selections || {})) {
-        const oldName = oldChoices[oldIdx];
-        if (typeof oldName === 'string') {
+      for (const [userId, stored] of Object.entries(poll.selections || {})) {
+        const translated = [];
+        for (const oldIdx of normalizeSelectionValue(stored)) {
+          const oldName = oldChoices[oldIdx];
+          if (typeof oldName !== 'string') continue;
           const newIdx = nameToNewIndex.get(oldName.toLowerCase());
-          if (typeof newIdx === 'number') remapped[userId] = newIdx;
+          if (typeof newIdx === 'number' && !translated.includes(newIdx)) {
+            translated.push(newIdx);
+            if (translated.length >= (poll.maxSelections || 1)) break;
+          }
         }
+        if (translated.length) remapped[userId] = translated;
       }
       poll.choices = newChoices;
       poll.selections = remapped;
-      if ((which === 'long')) state.longPoll = poll; else state.shortPoll = poll;
+      setPollByName(which, poll);
       saveState();
       // If active and message exists, refresh panel
       if (poll.active && poll.messageId && poll.channelId) {
         try {
-          const embed = (function(){
-            const p = poll;
-            const e = new EmbedBuilder()
-              .setTitle(which === 'long' ? '🗳️ Long-format Poll' : '🗳️ Short-format Poll')
-              .setColor(which === 'long' ? 0x9b59b6 : 0xf1c40f)
-              .setDescription(p.active ? 'Click a button to choose. You can change your vote anytime.' : 'Poll is closed.');
-            if (!p.choices.length) { e.addFields({ name: 'No choices', value: 'Use /' + which + ' edit to add choices.' }); return e; }
-            for (let j = 0; j < p.choices.length; j++) {
-              const name = p.choices[j];
-              const usersIn = Object.entries(p.selections).filter(([, c]) => c === j).map(([uid]) => `<@${uid}>`);
-              let value = '(empty)';
-              if (usersIn.length > 0) {
-                const shown = usersIn.slice(0, 20);
-                value = shown.join(', ');
-                if (usersIn.length > shown.length) value += `, +${usersIn.length - shown.length} more`;
-              }
-              e.addFields({ name: `${name} (${usersIn.length})`, value, inline: false });
-            }
-            return e;
-          })();
-          const rows = [];
-          poll.choices.slice(0, 25).forEach((label, k) => {
-            const btn = new ButtonBuilder()
-              .setCustomId(`${which}_select_${k}`)
-              .setStyle(which === 'long' ? ButtonStyle.Primary : ButtonStyle.Success)
-              .setLabel(label)
-              .setDisabled(!poll.active);
-            if (rows.length === 0 || rows[rows.length - 1].components.length >= 5) rows.push(new ActionRowBuilder().addComponents(btn));
-            else rows[rows.length - 1].addComponents(btn);
-          });
-          if (poll.choices.length > 0) {
-            const clearBtn = new ButtonBuilder()
-              .setCustomId(`${which}_clear`)
-              .setStyle(ButtonStyle.Secondary)
-              .setLabel('Clear my selection')
-              .setDisabled(!poll.active);
-            if (rows.length === 0) rows.push(new ActionRowBuilder().addComponents(clearBtn));
-            else if (rows[rows.length - 1].components.length < 5) rows[rows.length - 1].addComponents(clearBtn);
-            else if (rows.length < 5) rows.push(new ActionRowBuilder().addComponents(clearBtn));
-          }
           const ch = await i.guild.channels.fetch(poll.channelId);
           const msg = await ch.messages.fetch(poll.messageId);
-          await msg.edit({ embeds: [embed], components: rows });
+          await msg.edit({ embeds: [renderPollEmbed(poll, which, i.guild.name)], components: renderPollComponents(poll, which) });
         } catch {}
       }
   return i.reply({ content: `✅ Updated ${which} choices (${newChoices.length} items).`, flags: MessageFlags.Ephemeral });
