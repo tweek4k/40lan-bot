@@ -55,6 +55,9 @@ const POLL_MODAL = { [POLL.LONG]: 'long_edit_modal', [POLL.SHORT]: 'short_edit_m
 const POLL_INPUT = { [POLL.LONG]: 'long_choices_input', [POLL.SHORT]: 'short_choices_input' };
 const MAX_POLL_BUTTONS = 25;
 const makeChoiceId = (which, idx) => `${which}_select_${idx}`;
+const packageInfo = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+const BOT_VERSION = process.env.BOT_VERSION || `v${packageInfo.version || 'dev'}`;
+const BOT_STARTED_AT = new Date();
 
 // ----------------- load games + state -----------------
 const games = JSON.parse(fs.readFileSync('./games.json', 'utf8'));
@@ -123,6 +126,20 @@ function sanitizePollSelections(poll) {
     if (normalized.length) poll.selections[userId] = normalized;
     else delete poll.selections[userId];
   }
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  parts.push(`${secs}s`);
+  return parts.join(' ');
 }
 
 const getPollByName = (name) => name === POLL.LONG ? state.longPoll : state.shortPoll;
@@ -591,6 +608,9 @@ client.once(Events.ClientReady, async () => {
     { name: 'suggestgame', description: 'Suggest a new game title', options: [
       { type: 3, name: 'title', description: 'Game title', required: true }
     ] },
+    { name: 'lanbot', description: 'LAN bot utilities', options: [
+      { type: 1, name: 'version', description: 'Show current bot version + uptime' }
+    ] },
     { name: 'long', description: 'Admin: manage Long-format poll', defaultMemberPermissions: PermissionsBitField.Flags.Administrator, options: [
       { type: 1, name: 'edit', description: 'Edit the list of choices (modal)' },
       { type: 1, name: 'start', description: 'Start the poll in this channel (clears previous selections)', options: [
@@ -630,6 +650,24 @@ client.on(Events.InteractionCreate, async (i) => {
 
     // Slash commands
     if (i.isChatInputCommand()) {
+
+      if (i.commandName === 'lanbot') {
+        const sub = i.options.getSubcommand();
+        if (sub === 'version') {
+          const uptime = formatDuration(process.uptime());
+          const startedUnix = Math.floor(BOT_STARTED_AT.getTime() / 1000);
+          const embed = new EmbedBuilder()
+            .setTitle('🤖 LAN Bot')
+            .setColor(0x2ecc71)
+            .setDescription('Current deployment details')
+            .addFields(
+              { name: 'Version', value: BOT_VERSION, inline: true },
+              { name: 'Uptime', value: uptime, inline: true },
+              { name: 'Started', value: `<t:${startedUnix}:R>`, inline: false }
+            );
+          return i.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        }
+      }
 
       // Long/Short subcommands
       if (i.commandName === 'long' || i.commandName === 'short') {
